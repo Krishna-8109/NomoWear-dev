@@ -1,0 +1,595 @@
+import 'package:flutter/material.dart';
+import 'package:nomowear/core/network/api_exception.dart';
+import 'package:nomowear/core/utils/size_utils.dart';
+import 'package:nomowear/theme/theme_helper.dart';
+import 'package:nomowear/routes/app_routes.dart';
+import 'package:nomowear/features/profile/data/profile_repository.dart';
+import 'package:nomowear/features/profile/domain/user_order.dart';
+import 'package:nomowear/features/orders/data/order_repository.dart';
+import 'package:nomowear/features/orders/data/pending_return_store.dart';
+import 'package:nomowear/features/orders/data/user_order_mapper.dart';
+
+class MyOrdersScreen extends StatefulWidget {
+  const MyOrdersScreen({super.key});
+
+  @override
+  State<MyOrdersScreen> createState() => _MyOrdersScreenState();
+}
+
+class _MyOrdersScreenState extends State<MyOrdersScreen> {
+  final TextEditingController _search = TextEditingController();
+  final OrderRepository _orderRepository = OrderRepository();
+  final ProfileRepository _profileRepository = ProfileRepository();
+
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    if (userOrdersList.isNotEmpty) {
+      _isLoading = false;
+      // Re-apply waitlisted return flags against any cached list.
+      PendingReturnStore.instance.ensureLoaded().then((_) {
+        if (!mounted) return;
+        setState(() {});
+        _loadOrders(forceRefresh: true);
+      });
+    } else {
+      _loadOrders();
+    }
+  }
+
+  Future<void> _refreshAfterReturn() async {
+    await PendingReturnStore.instance.ensureLoaded();
+    if (!mounted) return;
+    // Prefer local pending flags immediately; then sync from API.
+    setState(() {});
+    await _loadOrders(forceRefresh: true);
+  }
+
+  Future<void> _loadOrders({bool forceRefresh = false}) async {
+    if (!forceRefresh && userOrdersList.isNotEmpty) {
+      setState(() {
+        _isLoading = false;
+        _errorMessage = null;
+      });
+      return;
+    }
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      await PendingReturnStore.instance.ensureLoaded();
+      final history = await _orderRepository.getOrderHistory(
+        forceRefresh: forceRefresh,
+      );
+      final customer = await _profileRepository.getProfile();
+      replaceUserOrders(
+        UserOrderMapper.fromHistory(history, customer: customer),
+      );
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    } on ApiException catch (e) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = e.message;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _errorMessage = 'Unable to load orders. Please try again.';
+        });
+      }
+    }
+  }
+
+  List<UserOrder> get _filtered {
+    final q = _search.text.trim().toLowerCase();
+    if (q.isEmpty) return List<UserOrder>.from(userOrdersList);
+    return userOrdersList.where((o) {
+      return o.title.toLowerCase().contains(q) ||
+          o.orderIdDisplay.toLowerCase().contains(q);
+    }).toList();
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final list = _filtered;
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 12.h),
+              child: Row(
+                children: [
+                  IconButton(
+                    onPressed: () => Navigator.pop(context),
+                    icon: Icon(Icons.arrow_back, color: AppColours.primary),
+                  ),
+                  Expanded(
+                    child: Text(
+                      'My Orders',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: AppColours.primary,
+                        fontSize: 18.fSize,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 48.w),
+                ],
+              ),
+            ),
+            Container(
+              height: 1,
+              margin: EdgeInsets.symmetric(horizontal: 20.w),
+              color: AppColours.primary.withOpacity(0.35),
+            ),
+            Padding(
+              padding: EdgeInsets.fromLTRB(20.w, 18.h, 20.w, 12.h),
+              child: TextField(
+                controller: _search,
+                onChanged: (_) => setState(() {}),
+                style: TextStyle(color: Colors.white, fontSize: 14.fSize),
+                decoration: InputDecoration(
+                  hintText: 'Search in orders',
+                  hintStyle: TextStyle(
+                    color: AppColours.primary.withOpacity(0.45),
+                    fontSize: 14.fSize,
+                  ),
+                  prefixIcon: Icon(Icons.search, color: AppColours.primary),
+                  filled: true,
+                  fillColor: const Color(0xFF16181D),
+                  contentPadding: EdgeInsets.symmetric(vertical: 14.h),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: AppColours.primary.withOpacity(0.7)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: AppColours.primary, width: 1.2),
+                  ),
+                ),
+              ),
+            ),
+            Expanded(
+              child: _isLoading
+                  ? Center(
+                      child: CircularProgressIndicator(color: AppColours.primary),
+                    )
+                  : _errorMessage != null
+                      ? _ErrorState(
+                          message: _errorMessage!,
+                          onRetry: () => _loadOrders(forceRefresh: true),
+                        )
+                      : list.isEmpty
+                          ? Center(
+                              child: Text(
+                                _search.text.trim().isEmpty
+                                    ? 'No orders yet.'
+                                    : 'No orders match your search.',
+                                style: TextStyle(
+                                  color: Colors.white54,
+                                  fontSize: 14.fSize,
+                                ),
+                              ),
+                            )
+                          : RefreshIndicator(
+                              color: AppColours.primary,
+                              backgroundColor: const Color(0xFF16181D),
+                              onRefresh: () => _loadOrders(forceRefresh: true),
+                              child: ListView.separated(
+                                physics: const AlwaysScrollableScrollPhysics(),
+                                padding: EdgeInsets.fromLTRB(20.w, 8.h, 20.w, 24.h),
+                                itemCount: list.length,
+                                separatorBuilder: (_, __) => SizedBox(height: 16.h),
+                                itemBuilder: (context, i) => _OrderListTile(
+                                  order: list[i],
+                                  onReturnSubmitted: _refreshAfterReturn,
+                                ),
+                              ),
+                            ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OrderListTile extends StatelessWidget {
+  final UserOrder order;
+  final Future<void> Function()? onReturnSubmitted;
+
+  const _OrderListTile({
+    required this.order,
+    this.onReturnSubmitted,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () => Navigator.pushNamed(
+        context,
+        AppRoutes.orderDetailsScreen,
+        arguments: order.id,
+      ).then((_) => onReturnSubmitted?.call()),
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        padding: EdgeInsets.all(10.w),
+        decoration: BoxDecoration(
+          color: const Color(0xFF070711),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+
+            /// IMAGE
+            _CoverThumb(order: order),
+
+            SizedBox(width: 12.w),
+
+            /// RIGHT SIDE
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+
+                  /// TITLE
+                  Text(
+                    order.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 14,color: AppColours.primary),
+                  ),
+
+                  SizedBox(height: 4.h),
+
+                  /// ORDER ID
+                  RichText(
+                    text: TextSpan(
+                      children: [
+                        TextSpan(
+                          text: 'Order Id: ',
+                          style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 12),
+
+                        ),
+                        TextSpan(
+                          text: order.orderIdDisplay,
+                          style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 12),
+
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  SizedBox(height: 4.h),
+
+                  /// ATTRIBUTE
+                  Text(
+                    '${order.attributeLabel}: ${order.attributeValue}',
+                    style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 12),
+
+                  ),
+
+                  SizedBox(height: 4.h),
+
+                  /// STATUS
+                  Text(
+                    '${order.statusLabel}: ${order.statusDate}',
+                    style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 12),
+
+                  ),
+
+                  SizedBox(height: 12.h),
+
+                  /// BUTTON
+                  SizedBox(
+                    width: double.infinity,
+                    height: 42.h,
+                    child: order.canReturn
+                        ? ElevatedButton(
+                            onPressed: () async {
+                              final submitted = await Navigator.pushNamed(
+                                context,
+                                AppRoutes.returnOrderScreen,
+                                arguments: {
+                                  'orderId': order.id,
+                                  'orderNumber': order.orderIdDisplay,
+                                },
+                              );
+                              if (submitted == true && context.mounted) {
+                                await onReturnSubmitted?.call();
+                                if (!context.mounted) return;
+                                Navigator.pushNamed(
+                                  context,
+                                  AppRoutes.orderTrackingScreen,
+                                  arguments: order.id,
+                                );
+                              }
+                            },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFD8B26A),
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: Text(
+                              'Return This Order',
+                              style: TextStyle(
+                                color: Colors.black,
+                                fontSize: 13.fSize,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          )
+                        : !order.isDelivered || order.isInReturnFlow
+                            ? OutlinedButton(
+                                onPressed: () => Navigator.pushNamed(
+                                  context,
+                                  AppRoutes.orderTrackingScreen,
+                                  arguments: order.id,
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  side: BorderSide(
+                                    color: order.isInReturnFlow
+                                        ? const Color(0xFFD8B26A)
+                                        : const Color(0x66E6C27A),
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                ),
+                                child: Text(
+                                  order.isInReturnFlow
+                                      ? 'Track Return'
+                                      : 'Track Your Order',
+                                  style: CustomTextStyles.openSansSemiBold
+                                      .copyWith(
+                                    fontSize: 10,
+                                    color: order.isInReturnFlow
+                                        ? Colors.white
+                                        : AppColours.secondary,
+                                  ),
+                                ),
+                              )
+                            : const SizedBox.shrink(),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+class _CoverThumb extends StatelessWidget {
+  final UserOrder order;
+
+  const _CoverThumb({required this.order});
+
+  @override
+  Widget build(BuildContext context) {
+    const width = 120.0;
+    const height = 140.0;
+    final images = order.coverImageAssets;
+
+    if (images.isEmpty) {
+      return _OrderImage(
+        source: '',
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+      );
+    }
+
+    if (images.length == 1) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: _OrderImage(
+          source: images.first,
+          width: width,
+          height: height,
+          fit: BoxFit.cover,
+        ),
+      );
+    }
+
+    return Container(
+      width: width,
+      height: height,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: const Color(0xFFD8B26A),
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(11),
+        child: GridView.builder(
+          physics: const NeverScrollableScrollPhysics(),
+          itemCount: 4,
+          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+            crossAxisCount: 2,
+            crossAxisSpacing: 1,
+            mainAxisSpacing: 1,
+            childAspectRatio: 0.82,
+          ),
+          itemBuilder: (context, index) {
+            return _OrderImage(
+              source: images[index % images.length],
+              fit: BoxFit.cover,
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+class _OrderImage extends StatelessWidget {
+  final String source;
+  final double? width;
+  final double? height;
+  final BoxFit fit;
+
+  const _OrderImage({
+    required this.source,
+    this.width,
+    this.height,
+    this.fit = BoxFit.cover,
+  });
+
+  bool get _isNetwork =>
+      source.startsWith('http://') || source.startsWith('https://');
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isNetwork) {
+      return Image.network(
+        source,
+        width: width,
+        height: height,
+        fit: fit,
+        errorBuilder: (_, __, ___) => _placeholder(),
+      );
+    }
+
+    return Image.asset(
+      source,
+      width: width,
+      height: height,
+      fit: fit,
+      errorBuilder: (_, __, ___) => _placeholder(),
+    );
+  }
+
+  Widget _placeholder() {
+    return Container(
+      width: width,
+      height: height,
+      color: const Color(0xFF16181D),
+      alignment: Alignment.center,
+      child: Icon(Icons.image_outlined, color: AppColours.primary.withOpacity(0.5)),
+    );
+  }
+}
+
+class _ErrorState extends StatelessWidget {
+  final String message;
+  final VoidCallback onRetry;
+
+  const _ErrorState({
+    required this.message,
+    required this.onRetry,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: EdgeInsets.symmetric(horizontal: 24.w),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              message,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white70, fontSize: 14.fSize),
+            ),
+            SizedBox(height: 16.h),
+            OutlinedButton(
+              onPressed: onRetry,
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: AppColours.primary.withOpacity(0.9)),
+                foregroundColor: AppColours.primary,
+              ),
+              child: const Text('Retry'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+class _OutlinedGoldButton extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+
+  const _OutlinedGoldButton({required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: double.infinity,
+      height: 40.h,
+      child: OutlinedButton(
+        onPressed: onTap,
+        style: OutlinedButton.styleFrom(
+          side: BorderSide(color: AppColours.primary.withOpacity(0.9)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          foregroundColor: AppColours.primary,
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: AppColours.primary,
+            fontSize: 12.fSize,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SolidGoldButton extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+
+  const _SolidGoldButton({required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: double.infinity,
+      height: 40.h,
+      child: ElevatedButton(
+        onPressed: onTap,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: AppColours.primary,
+          elevation: 0,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: Colors.black,
+            fontSize: 12.fSize,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
+  }
+}
