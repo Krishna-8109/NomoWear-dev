@@ -94,22 +94,10 @@ class _ActiveSubscriptionWidgetState extends State<ActiveSubscriptionWidget> {
       _isYearly ? plan.yearPrice : plan.monthPrice;
 
   List<String> _featuresForCategory(PlanCategory category) {
-    if (category.plans.isNotEmpty) {
-      final first = category.plans.first;
-      if (first.features.isNotEmpty) return first.features;
-      return [
-        '${first.durationDays} days',
-        '${first.maxGarments} garments',
-        'From ₹${first.monthPrice.round()}/month',
-      ];
+    if (category.features.isNotEmpty) {
+      return category.features;
     }
-    if (category.description != null && category.description!.isNotEmpty) {
-      return [category.description!];
-    }
-    return const [
-      'Flexible duration-based limits',
-      'Standard door-step delivery',
-    ];
+    return const [];
   }
 
   void _openUpgradePlans(PlanCategory category) {
@@ -122,6 +110,26 @@ class _ActiveSubscriptionWidgetState extends State<ActiveSubscriptionWidget> {
         ),
       ),
     );
+  }
+
+  List<String>? _matchedCurrentPlanFeatures() {
+    if (_categories.isEmpty) return null;
+    
+    final planRef = widget.subscription.planRef;
+    final planName = widget.subscription.planName;
+    
+    for (final category in _categories) {
+      for (final plan in category.plans) {
+        if (plan.id == planRef || plan.planRef == planRef || plan.planCode == planRef || (planRef.isEmpty && plan.name == planName)) {
+          debugPrint('CURRENT SUBSCRIPTION PLAN REF = $planRef');
+          debugPrint('MATCHED PLAN ID = ${plan.id}');
+          debugPrint('MATCHED PLAN CODE = ${plan.planCode}');
+          debugPrint('CURRENT PLAN FEATURES = ${plan.features}');
+          return plan.features.isNotEmpty ? plan.features : null;
+        }
+      }
+    }
+    return null;
   }
 
   @override
@@ -151,6 +159,7 @@ class _ActiveSubscriptionWidgetState extends State<ActiveSubscriptionWidget> {
           SubscriptionPlanCard(
             subscription: widget.subscription,
             showCurrentPlanBadge: true,
+            matchedFeatures: _matchedCurrentPlanFeatures(),
           ),
           if (_isLoadingCategories) ...[
             SizedBox(height: 24.h),

@@ -5,6 +5,8 @@ import 'package:nomowear/core/services/app_version_gate.dart';
 import 'package:nomowear/core/services/auth_storage.dart';
 import 'package:nomowear/features/auth/presentation/screens/splash_screen.dart';
 import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
+import 'package:nomowear/features/checkout/data/subscription_kit_preferences.dart';
+import 'package:nomowear/features/checkout/data/wardrobe_booking_session.dart';
 import 'package:nomowear/features/favorites/presentation/bloc/favorites_bloc.dart';
 
 /// Matches native Android launch background (`splash_background` in colors.xml).
@@ -29,6 +31,8 @@ Future<void> main() async {
   // Run version gate before UI so a new APK never boots into a stale session.
   // (SplashBloc also runs this as a safety net.)
   await AppVersionGate.ensureFreshInstallSession();
+  await SubscriptionKitPreferences.instance.restore();
+  await WardrobeBookingSession.instance.restore();
 
   if (kDebugMode) {
     await AuthStorage().logStoredToken(source: 'app_start');

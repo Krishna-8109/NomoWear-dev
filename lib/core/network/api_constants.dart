@@ -7,7 +7,11 @@ class ApiConstants {
   static const String registerPath = 'mobile/v1/register';
   static const String profilePath = 'mobile/v1/profile';
   static const String productsPath = 'mobile/v1/products';
+  static const String productsNearbyPath = 'mobile/v1/products/nearby';
+  static const String categoriesPath = 'categories';
   static const String wardrobeKitsPath = 'mobile/v1/wardrobe-kits';
+  static String checkEligibilityPath(String kitId) =>
+      '$wardrobeKitsPath/${kitId.trim()}/check-eligibility';
   static const String bannersPath = 'mobile/v1/banners';
   static const String planCategoriesPath = 'mobile/v1/plans/categories/';
   static const String plansPath = 'mobile/v1/plans';
@@ -42,14 +46,5 @@ class ApiConstants {
       'mobile/v1/customer-addresses/customer';
 
   /// Master location lists for Profile Address (State → City/Village).
-  ///
-  /// CHANGE: Placeholders for dedicated backend endpoints. Keep null until the
-  /// backend ships these routes, then set paths and switch
-  /// [LocationCubit] to [ApiLocationRepository].
-  ///
-  /// Suggested contracts (confirm with backend):
-  /// - GET statesPath?country=India → list of state names
-  /// - GET citiesPath?state={stateName} → list of city/village names
-  static const String? statesPath = null;
-  static const String? citiesPath = null;
+  /// Using Maps reverse geocoding data locally instead of CountriesNow external API.
 }

@@ -23,12 +23,24 @@ class ResolvedAddress {
     required this.fullAddress,
     required this.latitude,
     required this.longitude,
+    this.buildingNumber,
+    this.streetName,
+    this.country,
+    this.state,
+    this.city,
+    this.pincode,
   });
 
   final String areaTitle;
   final String fullAddress;
   final double latitude;
   final double longitude;
+  final String? buildingNumber;
+  final String? streetName;
+  final String? country;
+  final String? state;
+  final String? city;
+  final String? pincode;
 }
 
 class GoogleMapsService {
@@ -90,7 +102,7 @@ class GoogleMapsService {
       '/maps/api/place/details/json',
       {
         'place_id': placeId,
-        'fields': 'geometry,formatted_address,name',
+        'fields': 'geometry,formatted_address,name,address_components',
         'key': GoogleMapsConfig.apiKey,
       },
     );
@@ -115,11 +127,56 @@ class GoogleMapsService {
     final formatted = result['formatted_address']?.toString() ?? '';
     final name = result['name']?.toString() ?? '';
 
+    String? buildingNumber;
+    String? streetName;
+    String? country;
+    String? state;
+    String? city;
+    String? pincode;
+
+    final components = result['address_components'];
+    if (components is List) {
+      for (final item in components) {
+        if (item is! Map) continue;
+        final types = item['types'];
+        if (types is List) {
+          if (types.contains('street_number') || types.contains('premise') || types.contains('subpremise')) {
+            if (buildingNumber == null) {
+              buildingNumber = item['long_name']?.toString();
+            }
+          }
+          if (types.contains('route')) {
+            streetName = item['long_name']?.toString();
+          }
+          if (types.contains('country')) {
+            country = item['long_name']?.toString();
+          }
+          if (types.contains('administrative_area_level_1')) {
+            state = item['long_name']?.toString();
+          }
+          if (types.contains('locality') || types.contains('administrative_area_level_2') || types.contains('administrative_area_level_3')) {
+            if (city == null) {
+              city = item['long_name']?.toString();
+            }
+          }
+          if (types.contains('postal_code')) {
+            pincode = item['long_name']?.toString();
+          }
+        }
+      }
+    }
+
     return ResolvedAddress(
       areaTitle: name.isNotEmpty ? name : _areaFromAddress(formatted),
       fullAddress: formatted.isNotEmpty ? formatted : name,
       latitude: lat,
       longitude: lng,
+      buildingNumber: buildingNumber,
+      streetName: streetName,
+      country: country,
+      state: state,
+      city: city,
+      pincode: pincode,
     );
   }
 
@@ -151,11 +208,56 @@ class GoogleMapsService {
     final formatted = first['formatted_address']?.toString() ?? '';
     if (formatted.isEmpty) return null;
 
+    String? buildingNumber;
+    String? streetName;
+    String? country;
+    String? state;
+    String? city;
+    String? pincode;
+
+    final components = first['address_components'];
+    if (components is List) {
+      for (final item in components) {
+        if (item is! Map) continue;
+        final types = item['types'];
+        if (types is List) {
+          if (types.contains('street_number') || types.contains('premise') || types.contains('subpremise')) {
+            if (buildingNumber == null) {
+              buildingNumber = item['long_name']?.toString();
+            }
+          }
+          if (types.contains('route')) {
+            streetName = item['long_name']?.toString();
+          }
+          if (types.contains('country')) {
+            country = item['long_name']?.toString();
+          }
+          if (types.contains('administrative_area_level_1')) {
+            state = item['long_name']?.toString();
+          }
+          if (types.contains('locality') || types.contains('administrative_area_level_2') || types.contains('administrative_area_level_3')) {
+            if (city == null) {
+              city = item['long_name']?.toString();
+            }
+          }
+          if (types.contains('postal_code')) {
+            pincode = item['long_name']?.toString();
+          }
+        }
+      }
+    }
+
     return ResolvedAddress(
       areaTitle: _areaFromComponents(first) ?? _areaFromAddress(formatted),
       fullAddress: formatted,
       latitude: latitude,
       longitude: longitude,
+      buildingNumber: buildingNumber,
+      streetName: streetName,
+      country: country,
+      state: state,
+      city: city,
+      pincode: pincode,
     );
   }
 

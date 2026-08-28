@@ -3,6 +3,7 @@ class ProductVariant {
   final String productId;
   final String variantName;
   final String actualPrice;
+  final String? costPrice;
   final String? primaryImageUrl;
   final int stockOnHand;
   final String stockStatus;
@@ -13,6 +14,7 @@ class ProductVariant {
     required this.productId,
     required this.variantName,
     required this.actualPrice,
+    this.costPrice,
     this.primaryImageUrl,
     this.stockOnHand = 0,
     this.stockStatus = 'IN_STOCK',
@@ -39,6 +41,8 @@ class ProductVariant {
       actualPrice: json['actual_price']?.toString() ??
           json['actualPrice']?.toString() ??
           '0',
+      costPrice: json['cost_price']?.toString() ??
+          json['costPrice']?.toString(),
       primaryImageUrl: _nonEmpty(
         json['primary_image_url'] ?? json['primaryImageUrl'],
       ),

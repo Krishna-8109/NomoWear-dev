@@ -3,6 +3,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:nomowear/core/app_export.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
+import 'package:nomowear/features/cart/presentation/utils/cart_limits.dart';
 import 'package:nomowear/features/cart/presentation/widgets/wardrobe_limit_dialog.dart';
 import 'package:nomowear/features/favorites/presentation/bloc/favorites_bloc.dart';
 
@@ -228,15 +229,36 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                                 SizedBox(
                                   height: 32.h,
                                   width: 129.w,
-                                  child: ElevatedButton(
-                                    onPressed: () {
+                                  child: BlocBuilder<CartBloc, CartState>(
+                                    buildWhen: (previous, current) =>
+                                        previous.isProductPending(
+                                          productId: item.id,
+                                        ) !=
+                                        current.isProductPending(
+                                          productId: item.id,
+                                        ),
+                                    builder: (context, cartState) {
+                                      final pending = cartState.isProductPending(
+                                        productId: item.id,
+                                      );
+                                      return ElevatedButton(
+                                    onPressed: pending
+                                        ? null
+                                        : () {
+                                      final itemType =
+                                          CartLimits.cartItemTypeForListing();
                                       final cartItem = CartItem(
                                         id: item.id,
                                         productId: item.id,
                                         title: item.title,
                                         imageUrl: item.imageUrl,
                                         price: item.subtitle,
-                                        isEssential: false,
+                                        isEssential: itemType == 'essentials' ||
+                                            itemType == 'kids',
+                                        isKids: itemType == 'kids',
+                                        isSubscriptionGarment:
+                                            itemType == 'subscription',
+                                        itemType: itemType,
                                       );
                                       // Uses shared cart guards (UUID, wardrobe limit,
                                       // non-sub single-category restriction).
@@ -274,14 +296,25 @@ class _FavoritesScreenState extends State<FavoritesScreen> {
                                       ),
                                       padding: EdgeInsets.zero,
                                     ),
-                                    child: Text(
-                                      "Move to cart",
-                                      style: TextStyle(
-                                        color: Colors.black,
-                                        fontSize: 10.fSize,
-                                        fontWeight: FontWeight.bold,
-                                      ),
-                                    ),
+                                    child: pending
+                                        ? const SizedBox(
+                                            width: 14,
+                                            height: 14,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.black,
+                                            ),
+                                          )
+                                        : Text(
+                                            "Move to cart",
+                                            style: TextStyle(
+                                              color: Colors.black,
+                                              fontSize: 10.fSize,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                  );
+                                    },
                                   ),
                                 ),
                                 Spacer(),

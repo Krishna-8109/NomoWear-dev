@@ -1,5 +1,7 @@
 import 'package:nomowear/core/app_export.dart';
 import 'package:nomowear/core/network/api_exception.dart';
+import 'package:nomowear/features/plans/data/models/plan_category.dart';
+import 'package:nomowear/features/plans/data/plan_repository.dart';
 import 'package:nomowear/features/subscriptions/data/models/active_subscription.dart';
 import 'package:nomowear/features/subscriptions/data/subscription_repository.dart';
 import 'package:nomowear/features/subscriptions/presentation/widgets/subscription_plan_card.dart';
@@ -13,8 +15,10 @@ class MySubscriptionsScreen extends StatefulWidget {
 
 class _MySubscriptionsScreenState extends State<MySubscriptionsScreen> {
   final SubscriptionRepository _repository = SubscriptionRepository();
+  final PlanRepository _planRepository = PlanRepository();
 
   List<ActiveSubscription> _subscriptions = [];
+  List<PlanCategory> _categories = [];
   String? _currentSubscriptionId;
   bool _isLoading = true;
   String? _errorMessage;
@@ -32,11 +36,19 @@ class _MySubscriptionsScreenState extends State<MySubscriptionsScreen> {
     });
 
     try {
-      final subscriptions = await _repository.getMySubscriptions();
+      final results = await Future.wait([
+        _repository.getMySubscriptions(),
+        _planRepository.getPlanCategories().catchError((_) => <PlanCategory>[]),
+      ]);
+
       if (!mounted) return;
+      final subscriptions = results[0] as List<ActiveSubscription>;
+      final categories = results[1] as List<PlanCategory>;
       final current = ActiveSubscription.pickCurrent(subscriptions);
+
       setState(() {
         _subscriptions = subscriptions;
+        _categories = categories;
         _currentSubscriptionId = current?.id;
         _isLoading = false;
       });
@@ -55,6 +67,30 @@ class _MySubscriptionsScreenState extends State<MySubscriptionsScreen> {
         _errorMessage = 'Unable to load subscriptions. Please try again.';
       });
     }
+  }
+
+  List<String>? _matchedFeatures(ActiveSubscription subscription) {
+    if (_categories.isEmpty) return null;
+    final planRef = subscription.planRef.trim().toLowerCase();
+    final planName = subscription.planName.trim().toLowerCase();
+
+    for (final category in _categories) {
+      for (final plan in category.plans) {
+        if (plan.id.toLowerCase() == planRef ||
+            plan.planRef.toLowerCase() == planRef ||
+            plan.planCode.toLowerCase() == planRef ||
+            (planRef.isEmpty && plan.name.toLowerCase() == planName) ||
+            plan.name.toLowerCase() == planName) {
+          if (plan.features.isNotEmpty) return plan.features;
+          if (category.features.isNotEmpty) return category.features;
+        }
+      }
+      if (category.name.toLowerCase().contains(planName) ||
+          planName.contains(category.name.toLowerCase())) {
+        if (category.features.isNotEmpty) return category.features;
+      }
+    }
+    return null;
   }
 
   @override
@@ -176,6 +212,7 @@ class _MySubscriptionsScreenState extends State<MySubscriptionsScreen> {
           return SubscriptionPlanCard(
             subscription: subscription,
             showCurrentPlanBadge: isCurrent,
+            matchedFeatures: _matchedFeatures(subscription),
             statusLabel: isCurrent
                 ? null
                 : (subscription.isActive ? 'UPGRADED' : subscription.planStatus),

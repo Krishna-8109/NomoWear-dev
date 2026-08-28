@@ -55,6 +55,7 @@ class IconConstant {
   static const String delete2 = 'assets/icons/delete2.svg';
   static const String rating = 'assets/icons/rating.svg';
   static const String location = 'assets/icons/location.svg';
+  static const String mapPicker = 'assets/icons/map_picker.svg';
   static const String skip = 'assets/icons/skip.svg';
 
 }

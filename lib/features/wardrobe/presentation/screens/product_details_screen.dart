@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:nomowear/core/app_export.dart';
 import 'package:nomowear/core/network/api_exception.dart';
@@ -8,6 +9,7 @@ import 'package:nomowear/features/products/data/models/product_variant.dart';
 import 'package:nomowear/features/wardrobe/presentation/screens/wardrobe_screen.dart';
 import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
 import 'package:nomowear/features/cart/presentation/utils/cart_limits.dart';
+import 'package:nomowear/features/cart/presentation/utils/cart_stock.dart';
 import 'package:nomowear/features/cart/presentation/widgets/wardrobe_limit_dialog.dart';
 
 import '../../../favorites/presentation/bloc/favorites_bloc.dart';
@@ -200,24 +202,35 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
         selectedSize: _selectedSize,
       );
 
-  String? _detailValue(String prefix) {
-    for (final line in _product.productDetails) {
-      if (line.toLowerCase().startsWith(prefix.toLowerCase())) {
-        return line.substring(prefix.length).trim();
-      }
-    }
-    return null;
+  bool _isOutOfStockStatus(String status) {
+    final normalized = status.trim().toUpperCase();
+    if (normalized.isEmpty) return false;
+    return normalized == 'OUT_OF_STOCK' ||
+        normalized == 'OUT OF STOCK' ||
+        normalized == 'OOS';
   }
+
+  bool _isSelectedVariantAvailable() {
+    final variant = _selectedVariant;
+    if (variant != null) {
+      if (_isOutOfStockStatus(variant.stockStatus)) return false;
+      if (variant.stockOnHand <= 0) return false;
+      return true;
+    }
+    if (_isOutOfStockStatus(_product.stockStatus)) {
+      return false;
+    }
+    return true;
+  }
+
+
 
   List<String> get _details {
     final extraDetails = _product.productDetails.where((line) {
       final lower = line.toLowerCase();
       return !lower.startsWith('stock:') && !lower.startsWith('category:');
     }).toList(growable: false);
-    if (extraDetails.isNotEmpty) {
-      return extraDetails.take(4).toList(growable: false);
-    }
-    return const ['Fabric: Cotton', 'Fit: Slim Fit', 'Stretchable', 'Length: Regular'];
+    return extraDetails.take(4).toList(growable: false);
   }
 
   String get _favoriteId => _product.favoriteId;
@@ -268,9 +281,19 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     final cartId = variant != null && isApiUuid(productId) && isApiUuid(variant.id)
         ? '${productId}_${variant.id}'
         : (productId ?? _favoriteId);
-    final price = variant != null
-        ? ProductMapper.formatPrice(variant.actualPrice)
-        : _product.price;
+    final prices = ProductMapper.resolvePrice(_product, variant: variant);
+    final price = prices.discountedPrice;
+
+    final itemType = CartLimits.cartItemTypeForListing(itemType: _product.itemType);
+    final isKids = itemType == 'kids' ||
+        isKidsCategory(_product.category) ||
+        _isKidsProduct;
+    final isEssential = isKids ||
+        itemType == 'essentials' ||
+        isEssentialCategory(_product.category);
+    final effectiveItemType = isKids
+        ? 'kids'
+        : (isEssential ? 'essentials' : itemType);
 
     return CartItem(
       id: cartId,
@@ -280,7 +303,10 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
       imageUrl: selectedImage,
       price: price,
       selectedSize: _selectedSize,
-      isEssential: isEssentialCategory(_product.category),
+      isEssential: isEssential,
+      isKids: isKids,
+      isSubscriptionGarment: !isEssential && effectiveItemType == 'subscription',
+      itemType: effectiveItemType,
       category: _product.category,
     );
   }
@@ -302,7 +328,15 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    return BlocListener<CartBloc, CartState>(
+      listenWhen: (prev, curr) =>
+          curr.errorMessage != null &&
+          curr.errorMessage != prev.errorMessage &&
+          isSubscriptionQuotaError(curr.errorMessage),
+      listener: (context, state) {
+        _showSubscriptionQuotaDialog(context, state.errorMessage!);
+      },
+      child: Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       body: SafeArea(
         child: Column(
@@ -335,7 +369,9 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                         _buildImageCarousel(),
                         SizedBox(height: 16.h),
                         _buildTitleRow(),
-                        SizedBox(height: 4.h),
+                        SizedBox(height: 6.h),
+                        _buildPriceSection(),
+                        SizedBox(height: 8.h),
                         _buildDescription(),
                         SizedBox(height: 20.h),
                         _buildColorSection(),
@@ -365,6 +401,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           ],
         ),
       ),
+    ),
     );
   }
 
@@ -394,6 +431,8 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
             ),
           ),
           BlocBuilder<CartBloc, CartState>(
+            buildWhen: (previous, current) =>
+                previous.totalItems != current.totalItems,
             builder: (context, cartState) {
               final count = cartState.totalItems;
               return GestureDetector(
@@ -612,6 +651,50 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
     );
   }
 
+  Widget _buildPriceSection() {
+    final prices = ProductMapper.resolvePrice(_product, variant: _selectedVariant);
+
+    if (prices.hasDiscount) {
+      return Padding(
+        padding: EdgeInsets.symmetric(horizontal: 20.w),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            Text(
+              prices.discountedPrice,
+              style: CustomTextStyles.montserratBold.copyWith(
+                fontSize: 18,
+                color: AppColours.primary,
+              ),
+            ),
+            SizedBox(width: 8.w),
+            Text(
+              prices.actualPrice,
+              style: TextStyle(
+                color: Colors.white54,
+                fontSize: 14.fSize,
+                decoration: TextDecoration.lineThrough,
+                decorationColor: Colors.white54,
+              ),
+            ),
+          ],
+        ),
+      );
+    } else {
+      return Padding(
+        padding: EdgeInsets.symmetric(horizontal: 20.w),
+        child: Text(
+          prices.discountedPrice,
+          style: CustomTextStyles.montserratBold.copyWith(
+            fontSize: 18,
+            color: AppColours.primary,
+          ),
+        ),
+      );
+    }
+  }
+
   // ── Description ─────────────────────────────────────────────────────────
   Widget _buildDescription() {
     if (_product.description.isEmpty) return const SizedBox.shrink();
@@ -709,7 +792,7 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   // ── Size Section ────────────────────────────────────────────────────────
   Widget _buildSizeSection() {
     return Padding(
-      padding: EdgeInsets.symmetric(horizontal:18.w),
+      padding: EdgeInsets.symmetric(horizontal: 18.w),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -718,67 +801,63 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
             style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 14),
           ),
           SizedBox(height: 12.h),
-          Wrap(
-            spacing: 10.w,
-            runSpacing: 10.h,
-            children: _displaySizes.map((size) {
-              final isAvailable = _isKidsProduct
-                  ? true
-                  : _sizes
-                      .map((s) => s.toUpperCase())
-                      .contains(size.toUpperCase());
-              final isActive =
-                  _selectedSize.toUpperCase() == size.toUpperCase();
-              final isCompact = _isAdultLetterSize(size);
-              return GestureDetector(
-                onTap: isAvailable
-                    ? () => setState(() => _selectedSize = size)
-                    : null,
-                child: Container(
-                  width: isCompact ? 48.w : null,
-                  height: 40.h,
-                  padding: isCompact
-                      ? EdgeInsets.zero
-                      : EdgeInsets.symmetric(horizontal: 12.w),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: isActive
-                        ? AppColours.secondary
-                        : const Color(0xFF1A1A1A),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: isActive
-                          ? AppColours.primary
-                          : (isAvailable
-                              ? AppColours.primary
-                              : Colors.white10),
-                      width: isActive ? 1.5 : 1,
-                    ),
-                  ),
-                  child: Text(
-                    size,
-                    style: TextStyle(
-                      color: isActive
-                          ? Colors.black
-                          : (isAvailable
-                              ? AppColours.secondary
-                              : Colors.white38),
-                      fontSize: 13.fSize,
-                      fontWeight:
-                          isActive ? FontWeight.bold : FontWeight.w500,
-                    ),
-                  ),
-                ),
-              );
-            }).toList(),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (var i = 0; i < _displaySizes.length; i++) ...[
+                  if (i > 0) SizedBox(width: 10.w),
+                  _buildSizeChip(_displaySizes[i]),
+                ],
+              ],
+            ),
           ),
         ],
       ),
     );
   }
 
+  Widget _buildSizeChip(String size) {
+    final isAvailable = _isKidsProduct
+        ? true
+        : _sizes.map((s) => s.toUpperCase()).contains(size.toUpperCase());
+    final isActive = _selectedSize.toUpperCase() == size.toUpperCase();
+    final isCompact = _isAdultLetterSize(size);
+
+    return GestureDetector(
+      onTap: isAvailable ? () => setState(() => _selectedSize = size) : null,
+      child: Container(
+        width: isCompact ? 48.w : null,
+        height: 40.h,
+        padding: EdgeInsets.symmetric(horizontal: isCompact ? 0 : 14.w),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: isActive ? AppColours.secondary : const Color(0xFF1A1A1A),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: isActive
+                ? AppColours.primary
+                : (isAvailable ? AppColours.primary : Colors.white10),
+            width: isActive ? 1.5 : 1,
+          ),
+        ),
+        child: Text(
+          size,
+          style: TextStyle(
+            color: isActive
+                ? Colors.black
+                : (isAvailable ? AppColours.secondary : Colors.white38),
+            fontSize: 13.fSize,
+            fontWeight: isActive ? FontWeight.bold : FontWeight.w500,
+          ),
+        ),
+      ),
+    );
+  }
+
   // ── Product Details Section ─────────────────────────────────────────────
   Widget _buildProductDetailsSection() {
+    if (_details.isEmpty) return const SizedBox.shrink();
     return Padding(
       padding: EdgeInsets.symmetric(horizontal: 20.w),
       child: Column(
@@ -819,17 +898,90 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
   // ── Bottom Bar ──────────────────────────────────────────────────────────
   Widget _buildBottomBar() {
     return BlocBuilder<CartBloc, CartState>(
+      key: ValueKey('bottom_bar_${_selectedSize}_$_selectedColorIndex'),
+      buildWhen: (previous, current) {
+        final cartItem = _buildCartItem();
+        return previous.quantityForListingCard(
+                  productId: cartItem.productId,
+                  variantId: cartItem.variantId,
+                  itemType: cartItem.itemType,
+                ) !=
+                current.quantityForListingCard(
+                  productId: cartItem.productId,
+                  variantId: cartItem.variantId,
+                  itemType: cartItem.itemType,
+                ) ||
+            previous.isProductPending(
+                  productId: cartItem.productId,
+                  variantId: cartItem.variantId,
+                  itemType: cartItem.itemType,
+                ) !=
+                current.isProductPending(
+                  productId: cartItem.productId,
+                  variantId: cartItem.variantId,
+                  itemType: cartItem.itemType,
+                ) ||
+            previous.isVariantOutOfStock(
+                  productId: cartItem.productId,
+                  variantId: cartItem.variantId,
+                  itemType: cartItem.itemType,
+                ) !=
+                current.isVariantOutOfStock(
+                  productId: cartItem.productId,
+                  variantId: cartItem.variantId,
+                  itemType: cartItem.itemType,
+                );
+      },
       builder: (context, cartState) {
         final cartItem = _buildCartItem();
-        final existingLine = cartState.lineForProduct(
-          cartItem.productId,
+        final existingLine = cartState.lineForListingCard(
+          productId: cartItem.productId,
           variantId: cartItem.variantId,
+          itemType: cartItem.itemType,
         );
         final lineId = existingLine?.id ?? cartItem.id;
-        final qty = cartState.quantityForProduct(
-          cartItem.productId,
+        final qty = cartState.quantityForListingCard(
+          productId: cartItem.productId,
           variantId: cartItem.variantId,
+          itemType: cartItem.itemType,
         );
+        final pending = cartState.isProductPending(
+          productId: cartItem.productId,
+          variantId: cartItem.variantId,
+          itemType: cartItem.itemType,
+        );
+        final outOfStock = cartState.isVariantOutOfStock(
+          productId: cartItem.productId,
+          variantId: cartItem.variantId,
+          itemType: cartItem.itemType,
+        );
+        final outOfStockFromProduct = !_isSelectedVariantAvailable();
+        final showOutOfStock = outOfStock || outOfStockFromProduct;
+        final buttonState = qty > 0
+            ? 'QTY'
+            : pending
+                ? 'LOADING'
+                : showOutOfStock
+                    ? 'OUT_OF_STOCK'
+                    : 'ADD_TO_CART';
+        if (kDebugMode) {
+          debugPrint('[STOCK_DEBUG]');
+          debugPrint('productId=${cartItem.productId}');
+          debugPrint('variantId=${cartItem.variantId ?? '-'}');
+          debugPrint('size=${cartItem.selectedSize}');
+          debugPrint('stockQuantity=${_selectedVariant?.stockOnHand}');
+          debugPrint('isAvailable=${_isSelectedVariantAvailable()}');
+          debugPrint('buttonState=$buttonState');
+        }
+
+        debugPrint('===== SELECTED VARIANT BEFORE CART =====');
+        debugPrint('selected size = $_selectedSize');
+        debugPrint('selected color = $_selectedColor');
+        debugPrint('selected variant id = ${_selectedVariant?.id}');
+        debugPrint('selected variant name = ${_selectedVariant?.variantName}');
+        debugPrint('selected variant stock = ${_selectedVariant?.stockOnHand}');
+        debugPrint('========================================');
+
         final syncedCartItem = CartItem(
           id: lineId,
           productId: cartItem.productId,
@@ -838,8 +990,11 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           imageUrl: cartItem.imageUrl,
           price: cartItem.price,
           selectedSize: existingLine?.selectedSize ?? cartItem.selectedSize,
-          quantity: existingLine?.quantity ?? cartItem.quantity,
+          quantity: 1,
           isEssential: cartItem.isEssential,
+          isKids: cartItem.isKids,
+          isSubscriptionGarment: cartItem.isSubscriptionGarment,
+          itemType: cartItem.itemType,
           category: cartItem.category,
         );
 
@@ -856,7 +1011,27 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
               Expanded(
                 child: SizedBox(
                   height: 50.h,
-                  child: qty > 0
+                  child: showOutOfStock && qty <= 0
+                      ? OutlinedButton(
+                          onPressed: null,
+                          style: OutlinedButton.styleFrom(
+                            disabledForegroundColor: Colors.white38,
+                            side: BorderSide(
+                              color: Colors.white.withOpacity(0.2),
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            'Out of Stock',
+                            style: CustomTextStyles.montserratBold.copyWith(
+                              fontSize: 14,
+                              color: Colors.white38,
+                            ),
+                          ),
+                        )
+                      : qty > 0
                       ? Container(
                           decoration: BoxDecoration(
                             borderRadius: BorderRadius.circular(12),
@@ -882,13 +1057,22 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                               Expanded(
                                 flex: 2,
                                 child: Center(
-                                  child: Text(
-                                    '$qty',
-                                    style: CustomTextStyles.montserratBold.copyWith(
-                                      fontSize: 16,
-                                      color: AppColours.primary,
-                                    ),
-                                  ),
+                                  child: pending
+                                      ? const SizedBox(
+                                          width: 18,
+                                          height: 18,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Color(0xFFE6C27A),
+                                          ),
+                                        )
+                                      : Text(
+                                          '$qty',
+                                          style: CustomTextStyles.montserratBold.copyWith(
+                                            fontSize: 16,
+                                            color: AppColours.primary,
+                                          ),
+                                        ),
                                 ),
                               ),
                               Container(width: 1, color: AppColours.primary.withOpacity(0.35)),
@@ -906,13 +1090,24 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                           ),
                         )
                       : OutlinedButton.icon(
-                          onPressed: () {
-                            final added = tryAddToCart(context, syncedCartItem);
-                            if (!added) return;
-                          },
-                          icon: SvgPicture.asset(IconConstant.Cart, color: Colors.black),
+                          onPressed: pending
+                              ? null
+                              : () {
+                                  final added = tryAddToCart(context, syncedCartItem);
+                                  if (!added) return;
+                                },
+                          icon: pending
+                              ? const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.black,
+                                  ),
+                                )
+                              : SvgPicture.asset(IconConstant.Cart, color: Colors.black),
                           label: Text(
-                            'Add to cart',
+                            pending ? 'Adding...' : 'Add to cart',
                             style: CustomTextStyles.montserratBold.copyWith(fontSize: 14, color: Colors.black),
                           ),
                           style: OutlinedButton.styleFrom(
@@ -930,7 +1125,9 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
                 child: SizedBox(
                   height: 50.h,
                   child: ElevatedButton.icon(
-                    onPressed: () {
+                    onPressed: showOutOfStock
+                        ? null
+                        : () {
                       final added = tryAddToCart(context, cartItem);
                       if (!added) return;
 
@@ -960,6 +1157,45 @@ class _ProductDetailsScreenState extends State<ProductDetailsScreen> {
           ),
         );
       },
+    );
+  }
+
+  void _showSubscriptionQuotaDialog(BuildContext context, String message) {
+    final details = SubscriptionQuotaDetails.parse(message);
+    if (kDebugMode) {
+      debugPrint('[CART_QUOTA] showing subscription limit dialog');
+    }
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1D21),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          'Subscription Limit Reached',
+          style: CustomTextStyles.montserratBold.copyWith(
+            fontSize: 18,
+            color: AppColours.primary,
+          ),
+        ),
+        content: Text(
+          details.userFriendlyMessage,
+          style: CustomTextStyles.openSansRegular.copyWith(
+            fontSize: 14,
+            color: Colors.white70,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(
+              'OK',
+              style: CustomTextStyles.openSansSemiBold.copyWith(
+                color: AppColours.primary,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

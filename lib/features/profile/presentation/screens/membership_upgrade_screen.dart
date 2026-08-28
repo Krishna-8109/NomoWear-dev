@@ -2,6 +2,7 @@ import 'package:nomowear/core/app_export.dart';
 import 'package:nomowear/core/network/api_exception.dart';
 import 'package:nomowear/core/services/razorpay_service.dart';
 import 'package:nomowear/features/home/presentation/screens/subscription_tab_widget.dart';
+import 'package:nomowear/features/plans/data/plan_price_formatter.dart';
 import 'package:nomowear/features/profile/data/profile_cache.dart';
 import 'package:nomowear/features/profile/data/profile_repository.dart';
 import 'package:nomowear/features/profile/presentation/utils/profile_order_guard.dart';
@@ -293,86 +294,249 @@ class _MembershipUpgradeScreenState extends State<MembershipUpgradeScreen> {
     );
   }
 
+  static String _formatNum(num amount) {
+    if (amount % 1 == 0) {
+      return PlanPriceFormatter.format(amount.toInt());
+    } else {
+      final integerPart = amount.toInt();
+      final decimalPart = (amount - integerPart)
+          .toStringAsFixed(2)
+          .substring(2)
+          .replaceAll(RegExp(r'0+$'), '');
+      return '${PlanPriceFormatter.format(integerPart)}.$decimalPart';
+    }
+  }
+
+  static String _capitalize(String s) {
+    if (s.isEmpty) return s;
+    return '${s[0].toUpperCase()}${s.substring(1).toLowerCase()}';
+  }
+
+  String _remainingText(SubscriptionUpgradeProration proration) {
+    if (proration.prorationType == 'days') {
+      return '${proration.remainingDays} of ${proration.totalDays} days remaining';
+    }
+    return '${proration.remainingBookings} of ${proration.totalBookings} bookings remaining';
+  }
+
+  String _buildCalculationExplanation(SubscriptionUpgradePreview preview) {
+    final newAmt = _formatNum(preview.newPlan.planAmount);
+    final creditAmt = _formatNum(preview.proration.creditAmount);
+    final upgradeAmt = _formatNum(preview.proration.upgradeAmount);
+
+    return 'Plan price difference (₹$newAmt − ₹$creditAmt) = ₹$upgradeAmt. Your unused subscription credit is applied toward the upgrade.';
+  }
+
+  String _buildInfoNote(SubscriptionUpgradePreview preview) {
+    final currentPlan = preview.currentSubscription.planName;
+    final newPlan = preview.newPlan.planName;
+    final creditAmt = _formatNum(preview.proration.creditAmount);
+
+    return 'Your current $currentPlan subscription credit (₹$creditAmt) is deducted directly. Your new $newPlan plan starts immediately.';
+  }
+
   Widget _buildContent(SubscriptionUpgradePreview preview) {
     final proration = preview.proration;
+    final currentSub = preview.currentSubscription;
+    final newPlan = preview.newPlan;
+    final periodText =
+        newPlan.billingPeriod.toLowerCase() == 'yearly' ? 'year' : 'month';
 
     return Column(
       children: [
         Expanded(
           child: SingleChildScrollView(
-            padding: EdgeInsets.symmetric(horizontal: 24.w, vertical: 24.h),
+            padding: EdgeInsets.symmetric(horizontal: 20.w, vertical: 20.h),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  'UPGRADE SUMMARY',
-                  style: CustomTextStyles.montserratBold.copyWith(
-                    fontSize: 14,
-                    letterSpacing: 1.4,
-                  ),
-                ),
-                SizedBox(height: 16.h),
-                _planCard(
-                  title: 'Current plan',
-                  planName: preview.currentSubscription.planName,
-                  amount: preview.currentSubscription.amountLabel,
-                ),
-                SizedBox(height: 12.h),
-                _planCard(
-                  title: 'New plan',
-                  planName: preview.newPlan.planName,
-                  amount: preview.newPlan.amountLabel,
-                  highlight: true,
-                ),
-                SizedBox(height: 32.h),
-                Text(
-                  'PRORATION',
-                  style: CustomTextStyles.montserratBold.copyWith(
-                    fontSize: 14,
-                    color: AppColours.primary,
-                    letterSpacing: 2.0,
-                  ),
-                ),
-                SizedBox(height: 16.h),
-                _summaryRow('Unused credit', '- ${proration.creditLabel}'),
-                SizedBox(height: 12.h),
-                if (proration.prorationType == 'days')
-                  _summaryRow(
-                    'Remaining days',
-                    '${proration.remainingDays} of ${proration.totalDays}',
-                  )
-                else
-                  _summaryRow(
-                    'Remaining bookings',
-                    '${proration.remainingBookings} of ${proration.totalBookings}',
-                  ),
-                SizedBox(height: 20.h),
-                Divider(color: AppColours.primary, thickness: 0.2),
-                SizedBox(height: 20.h),
+                /// Top Plan Header
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      'Amount due today',
-                      style: CustomTextStyles.montserratBold.copyWith(
-                        fontSize: 18,
-                      ),
+                    Icon(
+                      Icons.trending_up,
+                      color: AppColours.primary,
+                      size: 18,
                     ),
+                    SizedBox(width: 8.w),
                     Text(
-                      proration.upgradeLabel,
+                      'PLAN UPGRADE',
                       style: CustomTextStyles.montserratBold.copyWith(
-                        fontSize: 24,
+                        fontSize: 13.fSize,
                         color: AppColours.primary,
+                        letterSpacing: 1.4,
                       ),
                     ),
                   ],
                 ),
+                SizedBox(height: 8.h),
+                Text(
+                  newPlan.planName,
+                  style: CustomTextStyles.montserratBold.copyWith(
+                    fontSize: 22.fSize,
+                    color: Colors.white,
+                  ),
+                ),
+                SizedBox(height: 4.h),
+                Text(
+                  '${_capitalize(newPlan.billingPeriod)} Billing',
+                  style: CustomTextStyles.openSansRegular.copyWith(
+                    fontSize: 13.fSize,
+                    color: Colors.white60,
+                  ),
+                ),
+                SizedBox(height: 20.h),
+
+                /// Unified Upgrade Summary Card
+                Container(
+                  width: double.maxFinite,
+                  padding: EdgeInsets.all(18.w),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF16181D),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: AppColours.primary.withOpacity(0.4),
+                      width: 1,
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      /// Current Plan Row
+                      _buildComparisonRow(
+                        label: 'Current Plan (${currentSub.planName})',
+                        amount: '₹ ${_formatNum(currentSub.planAmount)}',
+                        isAmountBold: true,
+                      ),
+                      SizedBox(height: 12.h),
+
+                      /// Upgrade Plan Row
+                      _buildComparisonRow(
+                        label: 'Upgrade Plan (${newPlan.planName})',
+                        amount: '₹ ${_formatNum(newPlan.planAmount)} / $periodText',
+                        isAmountBold: true,
+                      ),
+                      SizedBox(height: 14.h),
+
+                      /// Unused Credit Row
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Unused Plan Credit (${_remainingText(proration)})',
+                              style: CustomTextStyles.openSansRegular.copyWith(
+                                fontSize: 12.fSize,
+                                color: const Color(0xFF2EC4B6),
+                                height: 1.3,
+                              ),
+                            ),
+                          ),
+                          SizedBox(width: 12.w),
+                          Text(
+                            '- ₹ ${_formatNum(proration.creditAmount)}',
+                            style: CustomTextStyles.montserratBold.copyWith(
+                              fontSize: 13.fSize,
+                              color: const Color(0xFF2EC4B6),
+                            ),
+                          ),
+                        ],
+                      ),
+                      SizedBox(height: 16.h),
+                      Divider(
+                        color: AppColours.primary.withOpacity(0.25),
+                        thickness: 0.8,
+                      ),
+                      SizedBox(height: 16.h),
+
+                      /// Additional Amount Payable Section
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Additional Amount Payable',
+                                  style: CustomTextStyles.montserratBold.copyWith(
+                                    fontSize: 14.fSize,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                SizedBox(height: 6.h),
+                                Text(
+                                  _buildCalculationExplanation(preview),
+                                  style: CustomTextStyles.openSansRegular.copyWith(
+                                    fontSize: 11.fSize,
+                                    color: Colors.white54,
+                                    height: 1.4,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          SizedBox(width: 12.w),
+                          Text(
+                            '₹ ${_formatNum(proration.upgradeAmount)}',
+                            style: CustomTextStyles.montserratBold.copyWith(
+                              fontSize: 22.fSize,
+                              color: AppColours.primary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(height: 16.h),
+
+                /// User-Friendly Information Note Box
+                Container(
+                  width: double.maxFinite,
+                  padding: EdgeInsets.all(14.w),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF16181D),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: AppColours.primary.withOpacity(0.25),
+                      width: 1,
+                    ),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 3.w,
+                        height: 38.h,
+                        decoration: BoxDecoration(
+                          color: AppColours.primary,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                      SizedBox(width: 12.w),
+                      Expanded(
+                        child: Text(
+                          _buildInfoNote(preview),
+                          style: CustomTextStyles.openSansRegular.copyWith(
+                            fontSize: 12.fSize,
+                            color: Colors.white70,
+                            height: 1.4,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(height: 20.h),
               ],
             ),
           ),
         ),
+
+        /// Bottom PAY & UPGRADE Action
         Padding(
-          padding: EdgeInsets.symmetric(horizontal: 24.w, vertical: 16.h),
+          padding: EdgeInsets.fromLTRB(20.w, 8.h, 20.w, 20.h),
           child: SizedBox(
             width: double.maxFinite,
             height: 52.h,
@@ -384,6 +548,7 @@ class _MembershipUpgradeScreenState extends State<MembershipUpgradeScreen> {
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
                 ),
+                elevation: 0,
               ),
               child: _isProcessing
                   ? SizedBox(
@@ -395,11 +560,11 @@ class _MembershipUpgradeScreenState extends State<MembershipUpgradeScreen> {
                       ),
                     )
                   : Text(
-                      'PAY & UPGRADE',
+                      'PAY ₹${_formatNum(proration.upgradeAmount)} & UPGRADE',
                       style: CustomTextStyles.montserratBold.copyWith(
-                        fontSize: 16,
+                        fontSize: 15.fSize,
                         color: Colors.black,
-                        letterSpacing: 1.6,
+                        letterSpacing: 1.2,
                       ),
                     ),
             ),
@@ -409,66 +574,36 @@ class _MembershipUpgradeScreenState extends State<MembershipUpgradeScreen> {
     );
   }
 
-  Widget _planCard({
-    required String title,
-    required String planName,
+  Widget _buildComparisonRow({
+    required String label,
     required String amount,
-    bool highlight = false,
+    bool isAmountBold = false,
   }) {
-    return Container(
-      width: double.maxFinite,
-      padding: EdgeInsets.all(16.w),
-      decoration: BoxDecoration(
-        color: const Color(0xFF16181D),
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: highlight
-              ? AppColours.primary
-              : AppColours.primary.withOpacity(0.35),
-        ),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: CustomTextStyles.openSansRegular.copyWith(
-              fontSize: 12,
-              color: AppColours.hintcolor,
-            ),
-          ),
-          SizedBox(height: 8.h),
-          Text(
-            planName,
-            style: CustomTextStyles.montserratBold.copyWith(fontSize: 16),
-          ),
-          SizedBox(height: 4.h),
-          Text(
-            '$amount / ${widget.period}',
-            style: CustomTextStyles.openSansSemiBold.copyWith(
-              fontSize: 16,
-              color: AppColours.primary,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _summaryRow(String label, String value) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: CustomTextStyles.openSansRegular.copyWith(
-            fontSize: 14,
-            color: AppColours.hintcolor,
+        Expanded(
+          child: Text(
+            label,
+            style: CustomTextStyles.openSansRegular.copyWith(
+              fontSize: 13.fSize,
+              color: Colors.white70,
+            ),
           ),
         ),
+        SizedBox(width: 12.w),
         Text(
-          value,
-          style: CustomTextStyles.openSansSemiBold.copyWith(fontSize: 14),
+          amount,
+          style: isAmountBold
+              ? CustomTextStyles.montserratBold.copyWith(
+                  fontSize: 13.fSize,
+                  color: Colors.white,
+                )
+              : CustomTextStyles.openSansSemiBold.copyWith(
+                  fontSize: 13.fSize,
+                  color: Colors.white,
+                ),
         ),
       ],
     );

@@ -12,7 +12,14 @@ import 'package:nomowear/theme/theme_helper.dart';
 /// Map-based address picker. Pops with a `Map<String, dynamic>`:
 /// `areaTitle`, `locationDetails`, `latitude`, `longitude`.
 class SelectAddressScreen extends StatefulWidget {
-  const SelectAddressScreen({super.key});
+  final double? initialLatitude;
+  final double? initialLongitude;
+
+  const SelectAddressScreen({
+    super.key,
+    this.initialLatitude,
+    this.initialLongitude,
+  });
 
   @override
   State<SelectAddressScreen> createState() => _SelectAddressScreenState();
@@ -28,7 +35,7 @@ class _SelectAddressScreenState extends State<SelectAddressScreen> {
     GoogleMapsConfig.defaultLongitude,
   );
 
-  LatLng _mapCenter = _defaultCenter;
+  late LatLng _mapCenter;
   ResolvedAddress? _resolvedAddress;
   List<PlacePrediction> _predictions = [];
   bool _isResolvingAddress = true;
@@ -38,9 +45,18 @@ class _SelectAddressScreenState extends State<SelectAddressScreen> {
   @override
   void initState() {
     super.initState();
+    final lat = widget.initialLatitude;
+    final lng = widget.initialLongitude;
+    if (lat != null && lng != null) {
+      _mapCenter = LatLng(lat, lng);
+    } else {
+      _mapCenter = _defaultCenter;
+    }
     _searchController.addListener(_onSearchChanged);
     _resolveAddressAt(_mapCenter);
-    _tryMoveToCurrentLocation();
+    if (lat == null || lng == null) {
+      _tryMoveToCurrentLocation();
+    }
   }
 
   @override
@@ -126,25 +142,42 @@ class _SelectAddressScreenState extends State<SelectAddressScreen> {
     }
 
     final target = LatLng(resolved.latitude, resolved.longitude);
-    _mapController.move(target, 16);
-
+    
+    // Update state before moving the map to prevent _onMapMoved from overriding the resolved address
     if (!mounted) return;
     setState(() {
       _mapCenter = target;
       _resolvedAddress = resolved;
       _isResolvingAddress = false;
     });
+
+    _mapController.move(target, 16);
   }
 
   void _onConfirm() {
     final address = _resolvedAddress;
     if (address == null) return;
 
+    String finalAddress = address.fullAddress;
+    if (address.areaTitle.isNotEmpty && !address.fullAddress.toLowerCase().contains(address.areaTitle.toLowerCase())) {
+      finalAddress = '${address.areaTitle}, ${address.fullAddress}';
+    }
+
+    debugPrint('SELECTED PLACE NAME = ${address.areaTitle}');
+    debugPrint('SELECTED PLACE ADDRESS = ${address.fullAddress}');
+    debugPrint('FINAL PROFILE ADDRESS = $finalAddress');
+
     Navigator.pop(context, {
       'areaTitle': address.areaTitle,
-      'locationDetails': address.fullAddress,
+      'locationDetails': finalAddress,
       'latitude': address.latitude,
       'longitude': address.longitude,
+      'buildingNumber': address.buildingNumber,
+      'streetName': address.streetName,
+      'country': address.country,
+      'state': address.state,
+      'city': address.city,
+      'pincode': address.pincode,
     });
   }
 

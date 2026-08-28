@@ -38,14 +38,118 @@ class ApiClient {
     Map<String, dynamic> body, {
     String? authToken,
   }) async {
+    // Encode once so the log is the exact string written to the socket.
+    final encodedBody = jsonEncode(body);
     _logRequest(method: 'POST', path: path, body: body);
+    if (kDebugMode && path.contains('cart')) {
+      debugPrint('[CART_DEBUG] POST $path');
+      debugPrint('[CART_DEBUG] FINAL HTTP BODY = $encodedBody');
+      return _postCartWithNetworkTrace(
+        path: path,
+        encodedBody: encodedBody,
+        authToken: authToken,
+      );
+    }
     return _request(
       () => _client.post(
         _uri(path),
         headers: _headers(authToken: authToken, jsonBody: true),
-        body: jsonEncode(body),
+        body: encodedBody,
       ),
     );
+  }
+
+  Future<Map<String, dynamic>> _postCartWithNetworkTrace({
+    required String path,
+    required String encodedBody,
+    String? authToken,
+  }) async {
+    final uri = _uri(path);
+    final request = http.Request('POST', uri);
+    request.headers.addAll(_headers(authToken: authToken, jsonBody: true));
+    request.body = encodedBody;
+
+    final start = DateTime.now();
+    if (kDebugMode) {
+      debugPrint('[CART_NETWORK] POST_START timestamp=${start.toIso8601String()}');
+    }
+    try {
+      final requestSentAt = DateTime.now();
+      if (kDebugMode) {
+        debugPrint(
+          '[CART_NETWORK] REQUEST_SENT timestamp=${requestSentAt.toIso8601String()}',
+        );
+      }
+      final streamed = await _client
+          .send(request)
+          .timeout(const Duration(seconds: 30));
+
+      final headersReceivedAt = DateTime.now();
+      final headersLatencyMs = headersReceivedAt.difference(requestSentAt).inMilliseconds;
+      if (kDebugMode) {
+        debugPrint(
+          '[CART_NETWORK] RESPONSE_HEADERS_RECEIVED timestamp=${headersReceivedAt.toIso8601String()} duration_since_sent=${headersLatencyMs}ms',
+        );
+      }
+
+      DateTime? firstByteAt;
+      final bytes = <int>[];
+      await for (final chunk in streamed.stream) {
+        firstByteAt ??= DateTime.now();
+        bytes.addAll(chunk);
+      }
+      final completeAt = DateTime.now();
+
+      final networkDurationMs = completeAt.difference(start).inMilliseconds;
+      final firstByteMs = firstByteAt == null
+          ? -1
+          : firstByteAt.difference(start).inMilliseconds;
+      final transferMs = firstByteAt == null
+          ? -1
+          : completeAt.difference(firstByteAt).inMilliseconds;
+
+      if (kDebugMode) {
+        if (firstByteAt != null) {
+          debugPrint(
+            '[CART_NETWORK] RESPONSE_FIRST_BYTE timestamp=${firstByteAt.toIso8601String()}',
+          );
+        }
+        debugPrint(
+          '[CART_NETWORK] POST_COMPLETE timestamp=${completeAt.toIso8601String()}',
+        );
+        debugPrint('[CART_NETWORK] NETWORK_DURATION=${networkDurationMs}ms');
+        debugPrint('[CART_NETWORK] HEADERS_WAIT=${headersLatencyMs}ms');
+        debugPrint(
+          '[CART_NETWORK] LIKELY_SERVER_OR_NETWORK_WAIT=${headersLatencyMs > 500}',
+        );
+        debugPrint('[CART_NETWORK] TIME_TO_FIRST_BYTE=${firstByteMs}ms');
+        debugPrint('[CART_NETWORK] RESPONSE_TRANSFER_DURATION=${transferMs}ms');
+      }
+
+      final parseSw = Stopwatch()..start();
+      final bodyString = utf8.decode(bytes);
+      final response = http.Response(
+        bodyString,
+        streamed.statusCode,
+        headers: streamed.headers,
+        request: streamed.request,
+        reasonPhrase: streamed.reasonPhrase,
+        isRedirect: streamed.isRedirect,
+        persistentConnection: streamed.persistentConnection,
+      );
+      final decoded = _decodeResponse(response);
+      parseSw.stop();
+      if (kDebugMode) {
+        debugPrint('[CART_NETWORK] PARSE_DURATION=${parseSw.elapsedMilliseconds}ms');
+      }
+      return decoded;
+    } on ApiException {
+      rethrow;
+    } catch (_) {
+      throw const ApiException(
+        'Unable to connect. Check your network and server.',
+      );
+    }
   }
 
   Future<Map<String, dynamic>> get(

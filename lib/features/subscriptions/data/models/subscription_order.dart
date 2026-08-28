@@ -24,7 +24,15 @@ class SubscriptionOrder {
       razorpayKeyId: json['razorpayKeyId']?.toString() ??
           json['razorpay_key_id']?.toString() ??
           '',
-      amount: _parseAmount(json['amount']),
+      amount: _parseAmount(
+        json['totalAmount'] ??
+            json['total_amount'] ??
+            json['payableAmount'] ??
+            json['payable_amount'] ??
+            json['grandTotal'] ??
+            json['grand_total'] ??
+            json['amount'],
+      ),
       currency: json['currency']?.toString() ?? 'INR',
     );
   }

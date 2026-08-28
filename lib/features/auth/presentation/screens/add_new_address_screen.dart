@@ -15,6 +15,8 @@ class AddNewAddressScreen extends StatefulWidget {
   final String? initialAreaTitle;
   final double? initialLatitude;
   final double? initialLongitude;
+  final String? initialBuildingNumber;
+  final String? initialStreetName;
 
   const AddNewAddressScreen({
     super.key,
@@ -23,6 +25,8 @@ class AddNewAddressScreen extends StatefulWidget {
     this.initialAreaTitle,
     this.initialLatitude,
     this.initialLongitude,
+    this.initialBuildingNumber,
+    this.initialStreetName,
   });
 
   @override
@@ -52,6 +56,8 @@ class _AddNewAddressScreenState extends State<AddNewAddressScreen> {
       areaTitle: widget.initialAreaTitle,
       latitude: widget.initialLatitude,
       longitude: widget.initialLongitude,
+      buildingNumber: widget.initialBuildingNumber,
+      streetName: widget.initialStreetName,
     );
 
     final i = widget.initialAddress;
@@ -102,6 +108,8 @@ class _AddNewAddressScreenState extends State<AddNewAddressScreen> {
     String? areaTitle,
     double? latitude,
     double? longitude,
+    String? buildingNumber,
+    String? streetName,
   }) {
     final details = locationDetails?.trim();
     if (details != null && details.isNotEmpty) {
@@ -115,6 +123,14 @@ class _AddNewAddressScreenState extends State<AddNewAddressScreen> {
 
     if (latitude != null) _latitude = latitude;
     if (longitude != null) _longitude = longitude;
+
+    if (buildingNumber != null && buildingNumber.trim().isNotEmpty) {
+      _buildingController.text = buildingNumber.trim();
+    }
+    
+    if (streetName != null && streetName.trim().isNotEmpty) {
+      _streetController.text = streetName.trim();
+    }
   }
 
   double? _readCoordinate(dynamic value) {
@@ -154,6 +170,8 @@ class _AddNewAddressScreenState extends State<AddNewAddressScreen> {
         areaTitle: picked['areaTitle']?.toString(),
         latitude: _readCoordinate(picked['latitude']),
         longitude: _readCoordinate(picked['longitude']),
+        buildingNumber: picked['buildingNumber']?.toString(),
+        streetName: picked['streetName']?.toString(),
       );
     });
   }
@@ -162,13 +180,24 @@ class _AddNewAddressScreenState extends State<AddNewAddressScreen> {
     final b = _buildingController.text.trim();
     final s = _streetController.text.trim();
     final parts = <String>[];
+    
+    final lowerLoc = _locationDetails.toLowerCase();
+    
     if (b.isNotEmpty && s.isNotEmpty && b == s) {
-      parts.add(b);
+      if (!lowerLoc.contains(b.toLowerCase())) {
+        parts.add(b);
+      }
     } else {
-      if (b.isNotEmpty) parts.add(b);
-      if (s.isNotEmpty) parts.add(s);
+      if (b.isNotEmpty && !lowerLoc.contains(b.toLowerCase())) {
+        parts.add(b);
+      }
+      if (s.isNotEmpty && !lowerLoc.contains(s.toLowerCase())) {
+        parts.add(s);
+      }
     }
+    
     if (_locationDetails.isNotEmpty) parts.add(_locationDetails);
+    
     if (parts.isEmpty) return _locationDetails;
     if (parts.length == 1) return parts.first;
     final head = parts.sublist(0, parts.length - 1).join(', ');

@@ -6,6 +6,7 @@ class PlanCategory {
   final String? description;
   final int displayOrder;
   final bool isActive;
+  final List<String> features;
   final List<WardrobePlan> plans;
 
   const PlanCategory({
@@ -14,6 +15,7 @@ class PlanCategory {
     this.description,
     this.displayOrder = 0,
     this.isActive = true,
+    this.features = const [],
     this.plans = const [],
   });
 
@@ -37,6 +39,8 @@ class PlanCategory {
       displayOrder:
           _parseInt(json['displayOrder'] ?? json['display_order']) ?? 0,
       isActive: _parseBool(json['isActive'] ?? json['is_active'] ?? true),
+      features: (json['features'] as List?)?.map((e) => e.toString()).toList() ??
+          [],
       plans: plans.where((p) => p.isActive && p.id.isNotEmpty).toList(),
     );
   }

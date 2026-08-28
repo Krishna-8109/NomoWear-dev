@@ -1,9 +1,11 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:nomowear/features/banners/data/banner_cache.dart';
-import 'package:nomowear/features/cart/data/cart_image_cache.dart';
+
 import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
 import 'package:nomowear/features/checkout/data/checkout_session.dart';
+import 'package:nomowear/features/checkout/data/subscription_kit_preferences.dart';
+import 'package:nomowear/features/checkout/data/wardrobe_booking_session.dart';
 import 'package:nomowear/features/favorites/presentation/bloc/favorites_bloc.dart';
 import 'package:nomowear/features/orders/data/orders_cache.dart';
 import 'package:nomowear/features/orders/data/pending_return_store.dart';
@@ -50,9 +52,10 @@ class SessionCleanup {
     SubscriptionCache.instance.clear();
     OrdersCache.instance.clear();
 
-    // 2) Checkout draft for previous user.
+    // 2) Checkout draft and booking session for previous user.
     CheckoutSession.instance.clear();
-    await CartImageCache.instance.clear();
+    await WardrobeBookingSession.instance.resetForNewBooking();
+    await SubscriptionKitPreferences.instance.clear();
 
     // 3) Global lists used by My Orders / My Addresses screens.
     userOrdersList.clear();
@@ -66,6 +69,7 @@ class SessionCleanup {
     await prefs.remove(_authTokenKey);
     await prefs.remove(_mobileKey);
     await prefs.remove(_profileCompleteKey);
+    await prefs.remove('auth_profile_data');
 
     // 5) Decoded network images that may still show previous user's products.
     PaintingBinding.instance.imageCache.clear();

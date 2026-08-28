@@ -65,25 +65,47 @@ String newSavedAddressId() => 'addr_${DateTime.now().millisecondsSinceEpoch}';
 bool _isLocalOnlyAddressId(String id) => id.startsWith('addr_');
 
 String _formatCustomerAddress(CustomerAddress address) {
+  final building = address.buildingNumber?.trim() ?? '';
+  final street = address.streetName?.trim() ?? '';
+  
+  String baseAddress = '';
+  
   final full = address.fullAddress?.trim();
-  if (full != null && full.isNotEmpty) return full;
+  if (full != null && full.isNotEmpty) {
+    baseAddress = full;
+  } else {
+    final parts = <String?>[
+      address.addressLine1,
+      address.addressLine2,
+      address.city,
+      address.state,
+      address.pincode,
+      address.country,
+    ]
+        .map((part) => part?.trim())
+        .whereType<String>()
+        .where((part) => part.isNotEmpty)
+        .toList();
+    baseAddress = parts.join(', ');
+  }
 
-  final parts = <String?>[
-    address.buildingNumber,
-    address.streetName,
-    address.addressLine1,
-    address.addressLine2,
-    address.city,
-    address.state,
-    address.pincode,
-    address.country,
-  ]
-      .map((part) => part?.trim())
-      .whereType<String>()
-      .where((part) => part.isNotEmpty)
-      .toList();
+  final lowerBase = baseAddress.toLowerCase();
+  
+  final displayParts = <String>[];
+  
+  if (building.isNotEmpty && !lowerBase.contains(building.toLowerCase())) {
+    displayParts.add(building);
+  }
+  
+  if (street.isNotEmpty && !lowerBase.contains(street.toLowerCase())) {
+    displayParts.add(street);
+  }
+  
+  if (baseAddress.isNotEmpty) {
+    displayParts.add(baseAddress);
+  }
 
-  return parts.join(', ');
+  return displayParts.join(', ');
 }
 
 String _titleForAddress(CustomerAddress address, int index, {String? label}) {

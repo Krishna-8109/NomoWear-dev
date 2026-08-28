@@ -24,6 +24,8 @@ class RegisterProfileInput {
   final String? height;
   final String? weight;
   final String? bodySkinType;
+  final double? latitude;
+  final double? longitude;
 
   const RegisterProfileInput({
     required this.fullName,
@@ -40,6 +42,8 @@ class RegisterProfileInput {
     this.height,
     this.weight,
     this.bodySkinType,
+    this.latitude,
+    this.longitude,
   });
 
   Map<String, String> toMultipartFields() {
@@ -63,6 +67,8 @@ class RegisterProfileInput {
     if (bodySkinType != null && bodySkinType!.isNotEmpty) {
       fields['bodySkinType'] = bodySkinType!;
     }
+    if (latitude != null) fields['latitude'] = latitude!.toString();
+    if (longitude != null) fields['longitude'] = longitude!.toString();
     return fields;
   }
 
@@ -83,6 +89,8 @@ class UpdateProfileInput {
   final String? height;
   final String? weight;
   final String? bodySkinType;
+  final double? latitude;
+  final double? longitude;
   final ProfilePhotoFile? profilePhoto;
 
   const UpdateProfileInput({
@@ -99,6 +107,8 @@ class UpdateProfileInput {
     this.height,
     this.weight,
     this.bodySkinType,
+    this.latitude,
+    this.longitude,
     this.profilePhoto,
   });
 
@@ -128,6 +138,8 @@ class UpdateProfileInput {
     if (bodySkinType != null && bodySkinType!.isNotEmpty) {
       fields['bodySkinType'] = bodySkinType!;
     }
+    if (latitude != null) fields['latitude'] = latitude!.toString();
+    if (longitude != null) fields['longitude'] = longitude!.toString();
     return fields;
   }
 
@@ -157,19 +169,54 @@ class ProfileRepository {
 
   Future<Customer> register(RegisterProfileInput input) async {
     final Map<String, dynamic> json;
+    final fields = input.toMultipartFields();
 
     if (input.profilePhoto != null) {
-      json = await _apiClient.postMultipart(
-        ApiConstants.registerPath,
-        fields: input.toMultipartFields(),
-        files: _photoFiles(input.profilePhoto),
+      final uploadJson = await _apiClient.postMultipart(
+        'upload',
+        fields: {},
+        files: [
+          http.MultipartFile.fromBytes(
+            'file',
+            input.profilePhoto!.bytes,
+            filename: input.profilePhoto!.filename,
+          )
+        ],
       );
-    } else {
-      json = await _apiClient.postMultipart(
-        ApiConstants.registerPath,
-        fields: input.toMultipartFields(),
-      );
+
+      String? uploadedImageUrl;
+      if (uploadJson['profilePhoto'] != null) {
+        uploadedImageUrl = uploadJson['profilePhoto'].toString();
+      } else if (uploadJson['profile_photo'] != null) {
+        uploadedImageUrl = uploadJson['profile_photo'].toString();
+      } else if (uploadJson['url'] != null) {
+        uploadedImageUrl = uploadJson['url'].toString();
+      } else if (uploadJson['imageUrl'] != null) {
+        uploadedImageUrl = uploadJson['imageUrl'].toString();
+      } else if (uploadJson['fileUrl'] != null) {
+        uploadedImageUrl = uploadJson['fileUrl'].toString();
+      } else if (uploadJson['data'] is String) {
+        uploadedImageUrl = uploadJson['data'].toString();
+      } else if (uploadJson['data'] is Map && uploadJson['data']['url'] != null) {
+        uploadedImageUrl = uploadJson['data']['url'].toString();
+      } else if (uploadJson['path'] != null) {
+        uploadedImageUrl = uploadJson['path'].toString();
+      } else if (uploadJson['file'] != null) {
+        uploadedImageUrl = uploadJson['file'].toString();
+      }
+
+      if (uploadedImageUrl == null) {
+        throw const ApiException('Failed to upload image properly');
+      }
+
+      fields['profilePhoto'] = uploadedImageUrl;
+      fields['profile_photo'] = uploadedImageUrl;
     }
+
+    json = await _apiClient.postMultipart(
+      ApiConstants.registerPath,
+      fields: fields,
+    );
 
     if (json['success'] != true) {
       throw ApiException(
@@ -220,6 +267,9 @@ class ProfileRepository {
 
     final customer = Customer.fromJson(data);
     ProfileCache.instance.set(customer);
+    
+    print('AFTER APP RESTART PROFILE IMAGE =\n${customer.profilePhoto}');
+    
     return customer;
   }
 
@@ -230,14 +280,62 @@ class ProfileRepository {
     }
 
     final fields = input.toMultipartFields();
-    if (fields.isEmpty && input.profilePhoto == null) {
+    String? finalPhotoUrl;
+    
+    if (input.profilePhoto != null) {
+      final uploadJson = await _apiClient.postMultipart(
+        'upload',
+        fields: {},
+        files: [
+          http.MultipartFile.fromBytes(
+            'file',
+            input.profilePhoto!.bytes,
+            filename: input.profilePhoto!.filename,
+          )
+        ],
+        authToken: authToken,
+      );
+
+      String? uploadedImageUrl;
+      if (uploadJson['profilePhoto'] != null) {
+        uploadedImageUrl = uploadJson['profilePhoto'].toString();
+      } else if (uploadJson['profile_photo'] != null) {
+        uploadedImageUrl = uploadJson['profile_photo'].toString();
+      } else if (uploadJson['url'] != null) {
+        uploadedImageUrl = uploadJson['url'].toString();
+      } else if (uploadJson['imageUrl'] != null) {
+        uploadedImageUrl = uploadJson['imageUrl'].toString();
+      } else if (uploadJson['fileUrl'] != null) {
+        uploadedImageUrl = uploadJson['fileUrl'].toString();
+      } else if (uploadJson['data'] is String) {
+        uploadedImageUrl = uploadJson['data'].toString();
+      } else if (uploadJson['data'] is Map && uploadJson['data']['url'] != null) {
+        uploadedImageUrl = uploadJson['data']['url'].toString();
+      } else if (uploadJson['path'] != null) {
+        uploadedImageUrl = uploadJson['path'].toString();
+      } else if (uploadJson['file'] != null) {
+        uploadedImageUrl = uploadJson['file'].toString();
+      }
+
+      if (uploadedImageUrl == null) {
+        throw const ApiException('Failed to upload image properly');
+      }
+
+      print('UPLOAD RESPONSE PROFILE IMAGE =\n$uploadedImageUrl');
+
+      finalPhotoUrl = uploadedImageUrl;
+      fields['profilePhoto'] = uploadedImageUrl;
+      fields['profile_photo'] = uploadedImageUrl;
+    }
+
+    if (fields.isEmpty) {
       throw const ApiException('No profile changes to save');
     }
 
     final json = await _apiClient.putMultipart(
       ApiConstants.profilePath,
       fields: fields,
-      files: _photoFiles(input.profilePhoto),
+      files: const [], // We've already uploaded the file, send fields only
       authToken: authToken,
     );
 
@@ -252,8 +350,17 @@ class ProfileRepository {
       throw const ApiException('Invalid profile update response');
     }
 
-    final customer = Customer.fromJson(data);
+    final mutableData = Map<String, dynamic>.from(data);
+    if (finalPhotoUrl != null) {
+      mutableData['profilePhoto'] = finalPhotoUrl;
+      mutableData['profile_photo'] = finalPhotoUrl;
+    }
+
+    final customer = Customer.fromJson(mutableData);
     await _persistSession(customer, authToken: authToken);
+
+    print('PROFILE STATE PROFILE IMAGE =\n${customer.profilePhoto}');
+    print('LOCAL STORAGE PROFILE IMAGE =\n${ProfileCache.instance.customer?.profilePhoto}');
 
     return customer;
   }

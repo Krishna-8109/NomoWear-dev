@@ -1,247 +1,275 @@
 import 'dart:async';
 
+import 'package:equatable/equatable.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:equatable/equatable.dart';
-import 'package:nomowear/features/cart/data/cart_image_cache.dart';
+import 'package:nomowear/core/network/api_exception.dart';
+import 'package:nomowear/core/utils/api_id_utils.dart';
+
 import 'package:nomowear/features/cart/data/cart_repository.dart';
 import 'package:nomowear/features/cart/data/models/remote_cart.dart';
 import 'package:nomowear/features/cart/presentation/utils/cart_limits.dart';
+import 'package:nomowear/features/cart/presentation/utils/cart_stock.dart';
 import 'package:nomowear/features/checkout/data/checkout_session.dart';
-import 'package:nomowear/features/products/data/models/product.dart';
-import 'package:nomowear/features/products/data/models/product_variant.dart';
+import 'package:nomowear/features/checkout/data/subscription_kit_preferences.dart';
+import 'package:nomowear/features/checkout/data/wardrobe_booking_session.dart';
 import 'package:nomowear/features/products/data/product_cache.dart';
-import 'package:nomowear/features/products/data/product_catalog.dart';
-import 'package:nomowear/features/subscriptions/data/subscription_cache.dart';
+import 'package:nomowear/features/products/data/models/product_variant.dart';
+import 'package:nomowear/features/products/data/product_mapper.dart';
 
-/// Process cart mutation events one-at-a-time so optimistic qty never races.
-EventTransformer<E> _sequential<E>() {
-  return (events, mapper) => events.asyncExpand(mapper);
+void _cartLog(String message) {
+  if (kDebugMode) debugPrint('[CART] $message');
 }
 
-// TODO(CART_DEBUG): Remove this flag and all `_cartDebug` calls after verification.
-const bool _kCartDebugLogs = true;
-
-void _cartDebug(String message) {
-  if (_kCartDebugLogs && kDebugMode) {
-    debugPrint('[CART_DEBUG] $message');
-  }
+void _perf(String message) {
+  if (kDebugMode) debugPrint('[CART_PERF] $message');
 }
 
-String _cartItemIds(Iterable<CartItem> items) =>
-    items.map((e) => '${e.productId}|${e.variantId ?? '-'}|qty=${e.quantity}').join(', ');
+void _addUiLog(String message) {
+  if (kDebugMode) debugPrint('[CART_ADD_UI] $message');
+}
 
-String _remoteItemIds(Iterable<RemoteCartItem> items) =>
-    items.map((e) => '${e.productId}|${e.variantId ?? '-'}|qty=${e.quantity}').join(', ');
+enum CartStatus { initial, loading, loaded, updating, error }
 
+String _resolveItemType({
+  String? itemType,
+  bool? isKids,
+  bool? isEssential,
+  bool? isSubscriptionGarment,
+}) {
+  final explicit = itemType?.trim();
+  if (explicit != null && explicit.isNotEmpty) return explicit;
+  if (isKids == true) return 'kids';
+  if (isEssential == true) return 'essentials';
+  if (isSubscriptionGarment == true) return 'subscription';
+  if (isSubscriptionGarment == false) return 'non_subscription';
+  if (itemType != null) return itemType;
+  return 'non_subscription';
+}
 
-// ─────────────────────────── Model ────────────────────────────────
 class CartItem extends Equatable {
-  final String id;
-  final String productId;
-  final String? variantId;
-  final String title;
-  final String imageUrl;
-  final String? price;
-  String selectedSize;
-  int quantity;
-  final bool isEssential;
-  final String? category;
-
   CartItem({
-    required this.id,
-    String? productId,
+    String? id,
+    required this.productId,
     this.variantId,
     required this.title,
     required this.imageUrl,
     this.price,
     this.selectedSize = 'M',
     this.quantity = 1,
-    this.isEssential = false,
+    String? itemType,
+    bool? isKids,
+    bool? isEssential,
+    bool? isSubscriptionGarment,
     this.category,
-  }) : productId = productId ?? _resolveProductId(id, variantId);
+    this.productClass,
+    this.unitPrice = 0,
+    this.lineTotal = 0,
+    this.kitDetails,
+  })  : itemType = _resolveItemType(
+          itemType: itemType,
+          isKids: isKids,
+          isEssential: isEssential,
+          isSubscriptionGarment: isSubscriptionGarment,
+        ),
+        id = id ??
+            _lineId(
+              productId,
+              variantId,
+              _resolveItemType(
+                itemType: itemType,
+                isKids: isKids,
+                isEssential: isEssential,
+                isSubscriptionGarment: isSubscriptionGarment,
+              ),
+            );
+
+  final String id;
+  final String productId;
+  final String? variantId;
+  final String title;
+  final String imageUrl;
+  final String? price;
+  final String selectedSize;
+  final int quantity;
+  final String itemType;
+  final String? category;
+  final String? productClass;
+  final num unitPrice;
+  final num lineTotal;
+  final RemoteCartKitDetails? kitDetails;
+
+  String get productName => title;
+  String? get categoryName => category;
+  bool get isKids => itemType == 'kids';
+  bool get isEssential => itemType == 'essentials' || itemType == 'kids';
+  bool get isSubscriptionGarment => itemType == 'subscription';
 
   CartItem copyWith({
+    String? id,
     String? selectedSize,
     int? quantity,
+    bool? isSubscriptionGarment,
+    bool? isKids,
+    bool? isEssential,
+    String? itemType,
+    String? imageUrl,
+    String? price,
   }) {
+    final nextType = itemType ??
+        (isKids == true
+            ? 'kids'
+            : isEssential == true
+                ? 'essentials'
+                : isSubscriptionGarment == true
+                    ? 'subscription'
+                    : isSubscriptionGarment == false
+                        ? 'non_subscription'
+                        : this.itemType);
     return CartItem(
-      id: id,
+      id: id ?? this.id,
       productId: productId,
       variantId: variantId,
       title: title,
-      imageUrl: imageUrl,
-      price: price,
+      imageUrl: imageUrl ?? this.imageUrl,
+      price: price ?? this.price,
       selectedSize: selectedSize ?? this.selectedSize,
       quantity: quantity ?? this.quantity,
-      isEssential: isEssential,
+      itemType: nextType,
       category: category,
+      productClass: productClass,
+      unitPrice: unitPrice,
+      lineTotal: lineTotal,
+      kitDetails: kitDetails,
     );
   }
 
-  static String _resolveProductId(String id, String? variantId) {
-    final variant = variantId?.trim();
-    if (variant != null &&
-        variant.isNotEmpty &&
-        id.endsWith('_$variant')) {
-      return id.substring(0, id.length - variant.length - 1);
-    }
-    return id;
-  }
-
   @override
-  List<Object?> get props => [
-        id,
-        productId,
-        variantId,
-        title,
-        imageUrl,
-        price,
-        selectedSize,
-        quantity,
-        isEssential,
-        category,
-      ];
+  List<Object?> get props =>
+      [id, productId, variantId, quantity, selectedSize, itemType];
 }
 
-// ─────────────────────────── Events ───────────────────────────────
+String _lineId(String productId, String? variantId, String itemType) {
+  final vid = variantId?.trim();
+  final v = (vid == null || vid.isEmpty) ? '-' : vid;
+  return '${productId.trim()}_${v}_$itemType';
+}
+
+bool _variantsCompatible(String? a, String? b) {
+  final va = a?.trim() ?? '';
+  final vb = b?.trim() ?? '';
+  if (va.isEmpty && vb.isEmpty) return true;
+  return va == vb;
+}
+
 abstract class CartEvent extends Equatable {
   @override
   List<Object?> get props => [];
 }
 
 class LoadCartEvent extends CartEvent {
+  LoadCartEvent({this.forceRefresh = false, this.source = 'unknown'});
   final bool forceRefresh;
-  LoadCartEvent({this.forceRefresh = false});
-
+  final String source;
   @override
-  List<Object?> get props => [forceRefresh];
+  List<Object?> get props => [forceRefresh, source];
 }
 
 class AddToCartEvent extends CartEvent {
-  final CartItem item;
   AddToCartEvent(this.item);
+  final CartItem item;
   @override
   List<Object?> get props => [item];
 }
 
 class RemoveFromCartEvent extends CartEvent {
-  final String itemId;
   RemoveFromCartEvent(this.itemId);
+  final String itemId;
   @override
   List<Object?> get props => [itemId];
 }
 
 class UpdateCartItemSizeEvent extends CartEvent {
+  UpdateCartItemSizeEvent(this.itemId, this.size);
   final String itemId;
   final String size;
-  UpdateCartItemSizeEvent(this.itemId, this.size);
   @override
   List<Object?> get props => [itemId, size];
 }
 
+class UpdateCartItemVariantEvent extends CartEvent {
+  UpdateCartItemVariantEvent(this.itemId, this.newVariant);
+  final String itemId;
+  final ProductVariant newVariant;
+  @override
+  List<Object?> get props => [itemId, newVariant];
+}
+
 class UpdateCartItemQuantityEvent extends CartEvent {
+  UpdateCartItemQuantityEvent(this.itemId, this.quantity);
   final String itemId;
   final int quantity;
-  UpdateCartItemQuantityEvent(this.itemId, this.quantity);
   @override
   List<Object?> get props => [itemId, quantity];
 }
 
-/// Relative qty change from listing/details steppers (avoids stale absolute qty).
 class AdjustCartItemQuantityEvent extends CartEvent {
+  AdjustCartItemQuantityEvent(this.itemId, {required this.delta});
   final String itemId;
   final int delta;
-  AdjustCartItemQuantityEvent(this.itemId, {required this.delta});
   @override
   List<Object?> get props => [itemId, delta];
 }
 
-/// Applies a POST /cart response after async sync (may run after the mutation handler).
-class ApplyRemoteCartEvent extends CartEvent {
-  final RemoteCart remote;
-  final int seq;
-  final CartState? preserveKitFrom;
-
-  ApplyRemoteCartEvent({
-    required this.remote,
-    required this.seq,
-    this.preserveKitFrom,
-  });
-
-  @override
-  List<Object?> get props => [remote, seq, preserveKitFrom];
-}
-
 class ClearCartEvent extends CartEvent {}
 
-/// Resets local cart UI/state only (no remote API). Used on logout / APK update.
 class ClearLocalCartEvent extends CartEvent {}
 
+class ClearPaidRentalItemsEvent extends CartEvent {}
+
 class SetWardrobeKitDaysEvent extends CartEvent {
-  final int kitDays;
   SetWardrobeKitDaysEvent(this.kitDays);
+  final int kitDays;
   @override
   List<Object?> get props => [kitDays];
 }
 
 class SetWardrobeKitEvent extends CartEvent {
-  final String kitId;
-  final String? wardrobeKitProductId;
-  final int kitDays;
-  final String kitName;
-  final int maxGarments;
-  final String kitPrice;
-  /// Home wardrobe category lock key (e.g. "Comfort Wardrobe").
-  final String? wardrobeCategory;
-
   SetWardrobeKitEvent({
     required this.kitId,
     this.wardrobeKitProductId,
     required this.kitDays,
     required this.kitName,
     required this.maxGarments,
-    required this.kitPrice,
+    this.kitPrice,
     this.wardrobeCategory,
+    this.wardrobeCategoryId,
   });
-
-  @override
-  List<Object?> get props => [
-        kitId,
-        wardrobeKitProductId,
-        kitDays,
-        kitName,
-        maxGarments,
-        kitPrice,
-        wardrobeCategory,
-      ];
-}
-
-/// Locks non-sub flow to one home wardrobe category before garments are added.
-class LockWardrobeCategoryEvent extends CartEvent {
-  final String wardrobeCategory;
-
-  LockWardrobeCategoryEvent(this.wardrobeCategory);
-
-  @override
-  List<Object?> get props => [wardrobeCategory];
-}
-
-// ─────────────────────────── State ────────────────────────────────
-class CartState extends Equatable {
-  final List<CartItem> items;
-  final int wardrobeKitDays;
-  final String? wardrobeKitId;
+  final String kitId;
   final String? wardrobeKitProductId;
-  final String wardrobeKitName;
-  final int wardrobeKitMaxGarments;
-  final String? wardrobeKitPrice;
-  /// Locked home wardrobe category for non-sub single-category rule.
+  final int kitDays;
+  final String kitName;
+  final int maxGarments;
+  final String? kitPrice;
   final String? wardrobeCategory;
-  final bool isSyncing;
+  final String? wardrobeCategoryId;
+}
 
+class LockWardrobeCategoryEvent extends CartEvent {
+  LockWardrobeCategoryEvent({
+    required this.wardrobeCategory,
+    this.wardrobeCategoryId,
+  });
+  final String wardrobeCategory;
+  final String? wardrobeCategoryId;
+}
+
+class CartState extends Equatable {
   const CartState({
+    this.status = CartStatus.initial,
     this.items = const [],
+    this.remote = const RemoteCart(id: '', items: []),
+    this.errorMessage,
     this.wardrobeKitDays = 1,
     this.wardrobeKitId,
     this.wardrobeKitProductId,
@@ -249,103 +277,244 @@ class CartState extends Equatable {
     this.wardrobeKitMaxGarments = 0,
     this.wardrobeKitPrice,
     this.wardrobeCategory,
-    this.isSyncing = false,
+    this.wardrobeCategoryId,
+    this.pendingLineIds = const {},
+    this.outOfStockLineIds = const {},
   });
 
-  int get totalItems => items.fold(0, (sum, e) => sum + e.quantity);
+  final CartStatus status;
+  final List<CartItem> items;
+  final RemoteCart remote;
+  final String? errorMessage;
+  final int wardrobeKitDays;
+  final String? wardrobeKitId;
+  final String? wardrobeKitProductId;
+  final String wardrobeKitName;
+  final int wardrobeKitMaxGarments;
+  final String? wardrobeKitPrice;
+  final String? wardrobeCategory;
+  final String? wardrobeCategoryId;
+  final Set<String> pendingLineIds;
+  final Set<String> outOfStockLineIds;
 
-  List<CartItem> get wardrobeItems =>
-      items.where((e) => !e.isEssential).toList();
+  int get apiItemCount => remote.itemCount;
+  int get totalItems => items.fold<int>(0, (sum, item) => sum + item.quantity);
 
-  List<CartItem> get essentialItems =>
-      items.where((e) => e.isEssential).toList();
+  List<CartItem> get subscriptionGarmentItems =>
+      items.where((e) => e.itemType == 'subscription').toList();
+  List<CartItem> get paidRentalGarmentItems =>
+      items.where((e) => e.itemType == 'non_subscription').toList();
+  List<CartItem> get essentialsOnlyItems =>
+      items.where((e) => e.itemType == 'essentials').toList();
+  List<CartItem> get kidsItems =>
+      items.where((e) => e.itemType == 'kids').toList();
+  List<CartItem> get wardrobeItems => items
+      .where((e) =>
+          e.itemType == 'subscription' || e.itemType == 'non_subscription')
+      .toList();
+  List<CartItem> get essentialItems => items
+      .where((e) => e.itemType == 'essentials' || e.itemType == 'kids')
+      .toList();
+  List<CartItem> get purchaseItems => essentialItems;
+  List<CartItem> get groupedEssentialItems => essentialsOnlyItems;
 
-  /// Non-subscription wardrobe kit: essentials are shown under the wardrobe
-  /// section (SELECTED GARMENTS), not as a separate ESSENTIAL WEAR block.
-  /// Subscription kit bookings and essentials-only carts are unchanged.
-  bool get shouldGroupEssentialsUnderWardrobe {
-    if (wardrobeItems.isEmpty) return false;
-    if (CheckoutSession.instance.useSubscriptionBooking) return false;
-    return true;
+  bool get hasMixedWardrobeTypes =>
+      subscriptionGarmentItems.isNotEmpty && paidRentalGarmentItems.isNotEmpty;
+  bool get hasSubscriptionGarments => subscriptionGarmentItems.isNotEmpty;
+  bool get hasPaidRentalGarments => paidRentalGarmentItems.isNotEmpty;
+
+  int get subscriptionGarmentCount => subscriptionGarmentItems.fold<int>(
+        0,
+        (sum, item) => sum + item.quantity,
+      );
+  int get paidRentalGarmentCount => paidRentalGarmentItems.fold<int>(
+        0,
+        (sum, item) => sum + item.quantity,
+      );
+  int get wardrobeGarmentCount => wardrobeItems.fold<int>(
+        0,
+        (sum, item) => sum + item.quantity,
+      );
+
+  int get currentBookingSelectedGarments => subscriptionGarmentCount;
+  int get currentKitLimit {
+    if (wardrobeKitMaxGarments > 0) return wardrobeKitMaxGarments;
+    final sessionLimit = WardrobeBookingSession.instance.kitGarmentLimit;
+    if (sessionLimit > 0) return sessionLimit;
+    final prefLimit = SubscriptionKitPreferences.instance.wardrobeKitMaxGarments;
+    if (prefLimit > 0) return prefLimit;
+    return maxWardrobeGarments;
   }
 
-  /// Items rendered in the wardrobe / SELECTED GARMENTS UI.
-  List<CartItem> get groupedWardrobeItems {
-    if (!shouldGroupEssentialsUnderWardrobe) return wardrobeItems;
-    return [...wardrobeItems, ...essentialItems];
+  int get currentBookingRemaining {
+    final remaining = currentKitLimit - currentBookingSelectedGarments;
+    return remaining < 0 ? 0 : remaining;
   }
 
-  /// Items rendered in the standalone ESSENTIAL WEAR section.
-  List<CartItem> get groupedEssentialItems {
-    if (shouldGroupEssentialsUnderWardrobe) return const [];
-    return essentialItems;
+  bool get shouldGroupEssentialsUnderWardrobe => false;
+
+  int get maxWardrobeGarments {
+    if (wardrobeKitMaxGarments > 0) return wardrobeKitMaxGarments;
+    final sessionLimit = WardrobeBookingSession.instance.kitGarmentLimit;
+    if (sessionLimit > 0) return sessionLimit;
+    final prefLimit = SubscriptionKitPreferences.instance.wardrobeKitMaxGarments;
+    if (prefLimit > 0) return prefLimit;
+    final days = wardrobeKitDays > 0
+        ? wardrobeKitDays
+        : SubscriptionKitPreferences.instance.wardrobeKitDays;
+    if (days == 1) return 4;
+    if (days == 3) return 7;
+    if (days == 7) return 10;
+    if (days > 0) return 4;
+    if (wardrobeItems.isNotEmpty ||
+        WardrobeBookingSession.instance.kitSelected ||
+        SubscriptionKitPreferences.instance.isKitConfigured) {
+      return 4;
+    }
+    return 0;
   }
 
-  String get wardrobeKitTitle => wardrobeKitName.isNotEmpty
+  String get wardrobeKitTitle => wardrobeKitName.isNotEmpty &&
+          wardrobeKitName.toLowerCase() != 'custom' &&
+          wardrobeKitName.toLowerCase() != 'standard'
       ? wardrobeKitName
       : '$wardrobeKitDays Day wardrobe kit';
 
-  static const Map<int, int> maxGarmentsByKitDays = {
-    1: 4,
-    3: 8,
-    5: 8,
-    7: 10,
-  };
+  bool get isEmpty => items.isEmpty && remote.itemCount <= 0;
+  bool get isConfirmedEmpty => status == CartStatus.loaded && isEmpty;
+  bool get isSyncing =>
+      status == CartStatus.loading || status == CartStatus.updating;
+  bool get hasLoadedRemote =>
+      status == CartStatus.loaded ||
+      status == CartStatus.updating ||
+      status == CartStatus.error;
+  bool get showLoading =>
+      status == CartStatus.initial ||
+      (status == CartStatus.loading && items.isEmpty);
 
-  int get maxWardrobeGarments => wardrobeKitMaxGarments > 0
-      ? wardrobeKitMaxGarments
-      : maxGarmentsByKitDays[wardrobeKitDays] ?? 4;
+  bool isLinePending(String lineId) => pendingLineIds.contains(lineId);
 
-  int get wardrobeGarmentCount =>
-      wardrobeItems.fold<int>(0, (sum, item) => sum + item.quantity);
-
-  bool get isEmpty => items.isEmpty;
-
-  /// Resolves the cart line for a catalog product.
-  /// Prefers an exact variant match, then falls back to any line for [productId]
-  /// so listing/details UI stays in sync after remote cart reconcile.
-  CartItem? lineForProduct(String? productId, {String? variantId}) {
+  bool isProductPending({
+    String? productId,
+    String? variantId,
+    String? itemType,
+  }) {
     final pid = productId?.trim() ?? '';
-    if (pid.isEmpty) return null;
-
-    final vid = variantId?.trim();
-    if (vid != null && vid.isNotEmpty) {
-      for (final item in items) {
-        if (item.productId == pid && item.variantId == vid) return item;
-        if (item.id == '${pid}_$vid') return item;
-      }
+    if (pid.isEmpty) return false;
+    final type =
+        (itemType == null || itemType.isEmpty) ? 'non_subscription' : itemType;
+    if (pendingLineIds.contains(_lineId(pid, variantId, type))) return true;
+    if (pendingLineIds.contains(_lineId(pid, null, type))) return true;
+    final prefix = '${pid}_';
+    for (final key in pendingLineIds) {
+      if (key.startsWith(prefix)) return true;
     }
-
-    for (final item in items) {
-      if (item.productId == pid) return item;
-    }
-    return null;
+    return false;
   }
 
-  /// Quantity shown on product cards for [productId] (optionally a variant).
-  int quantityForProduct(String? productId, {String? variantId}) {
+  bool isVariantOutOfStock({
+    String? productId,
+    String? variantId,
+    String? itemType,
+  }) {
+    final pid = productId?.trim() ?? '';
+    if (pid.isEmpty) return false;
+    final type =
+        (itemType == null || itemType.isEmpty) ? 'non_subscription' : itemType;
+    return outOfStockLineIds.contains(_lineId(pid, variantId, type));
+  }
+
+  int quantityForListingCard({
+    String? productId,
+    String? variantId,
+    String? itemType,
+  }) {
+    final exact = quantityForProduct(
+      productId,
+      variantId: variantId,
+      itemType: itemType,
+    );
+    if (exact > 0) return exact;
+    return quantityForProduct(productId, variantId: variantId);
+  }
+
+  CartItem? lineForListingCard({
+    String? productId,
+    String? variantId,
+    String? itemType,
+  }) {
+    return lineForProduct(
+          productId,
+          variantId: variantId,
+          itemType: itemType,
+        ) ??
+        lineForProduct(
+          productId,
+          variantId: variantId,
+        );
+  }
+
+  CartItem? lineForProduct(
+    String? productId, {
+    String? variantId,
+    String? itemType,
+    bool? isEssential,
+    bool? isSubscriptionGarment,
+  }) {
+    final pid = productId?.trim() ?? '';
+    if (pid.isEmpty) return null;
+    final vid = variantId?.trim();
+    String? type = itemType;
+    if (type == null) {
+      if (isSubscriptionGarment == true) type = 'subscription';
+      if (isEssential == true) type = 'essentials';
+      if (isSubscriptionGarment == false && isEssential == false) {
+        type = 'non_subscription';
+      }
+    }
+    CartItem? fallback;
+    for (final item in items) {
+      if (item.productId.trim() != pid) continue;
+      if (vid != null &&
+          vid.isNotEmpty &&
+          !_variantsCompatible(item.variantId, vid) &&
+          item.id != '${pid}_$vid') {
+        continue;
+      }
+      if (type != null && item.itemType != type) continue;
+      if (vid != null &&
+          vid.isNotEmpty &&
+          (_variantsCompatible(item.variantId, vid) ||
+              item.id == '${pid}_$vid')) {
+        return item;
+      }
+      fallback ??= item;
+    }
+    return fallback;
+  }
+
+  int quantityForProduct(
+    String? productId, {
+    String? variantId,
+    String? itemType,
+  }) {
     final pid = productId?.trim() ?? '';
     if (pid.isEmpty) return 0;
-
     final vid = variantId?.trim();
-    if (vid != null && vid.isNotEmpty) {
-      final exactQty = items
-          .where(
-            (item) =>
-                item.productId == pid &&
-                (item.variantId == vid || item.id == '${pid}_$vid'),
-          )
-          .fold<int>(0, (sum, item) => sum + item.quantity);
-      if (exactQty > 0) return exactQty;
-    }
-
-    return items
-        .where((item) => item.productId == pid)
-        .fold<int>(0, (sum, item) => sum + item.quantity);
+    return items.where((item) {
+      if (item.productId.trim() != pid) return false;
+      if (itemType != null && item.itemType != itemType) return false;
+      if (vid == null || vid.isEmpty) return true;
+      return _variantsCompatible(item.variantId, vid) ||
+          item.id == '${pid}_$vid';
+    }).fold<int>(0, (sum, item) => sum + item.quantity);
   }
 
   CartState copyWith({
+    CartStatus? status,
     List<CartItem>? items,
+    RemoteCart? remote,
+    String? errorMessage,
     int? wardrobeKitDays,
     String? wardrobeKitId,
     String? wardrobeKitProductId,
@@ -353,11 +522,17 @@ class CartState extends Equatable {
     int? wardrobeKitMaxGarments,
     String? wardrobeKitPrice,
     String? wardrobeCategory,
-    bool? isSyncing,
+    String? wardrobeCategoryId,
+    Set<String>? pendingLineIds,
+    Set<String>? outOfStockLineIds,
     bool clearWardrobeKit = false,
+    bool clearError = false,
   }) {
     return CartState(
+      status: status ?? this.status,
       items: items ?? this.items,
+      remote: remote ?? this.remote,
+      errorMessage: clearError ? null : errorMessage ?? this.errorMessage,
       wardrobeKitDays: wardrobeKitDays ?? this.wardrobeKitDays,
       wardrobeKitId:
           clearWardrobeKit ? null : wardrobeKitId ?? this.wardrobeKitId,
@@ -372,47 +547,42 @@ class CartState extends Equatable {
       wardrobeKitPrice: clearWardrobeKit
           ? null
           : wardrobeKitPrice ?? this.wardrobeKitPrice,
-      wardrobeCategory: clearWardrobeKit
-          ? null
-          : wardrobeCategory ?? this.wardrobeCategory,
-      isSyncing: isSyncing ?? this.isSyncing,
+      wardrobeCategory: wardrobeCategory ?? this.wardrobeCategory,
+      wardrobeCategoryId: wardrobeCategoryId ?? this.wardrobeCategoryId,
+      pendingLineIds: pendingLineIds ?? this.pendingLineIds,
+      outOfStockLineIds: outOfStockLineIds ?? this.outOfStockLineIds,
     );
   }
 
   @override
   List<Object?> get props => [
+        status,
         items,
-        wardrobeKitDays,
+        remote.itemCount,
+        remote.id,
+        errorMessage,
         wardrobeKitId,
-        wardrobeKitProductId,
-        wardrobeKitName,
-        wardrobeKitMaxGarments,
-        wardrobeKitPrice,
+        wardrobeKitDays,
         wardrobeCategory,
-        isSyncing,
+        pendingLineIds.join(','),
+        outOfStockLineIds.join(','),
       ];
 }
 
-// ─────────────────────────── Bloc ─────────────────────────────────
 class CartBloc extends Bloc<CartEvent, CartState> {
   CartBloc({CartRepository? repository})
       : _repository = repository ?? CartRepository(),
         super(const CartState()) {
-    on<LoadCartEvent>(_onLoadCart, transformer: _sequential());
-    on<AddToCartEvent>(_onAddToCart, transformer: _sequential());
-    on<RemoveFromCartEvent>(_onRemoveFromCart, transformer: _sequential());
-    on<UpdateCartItemSizeEvent>(_onUpdateSize, transformer: _sequential());
-    on<UpdateCartItemQuantityEvent>(
-      _onUpdateQuantity,
-      transformer: _sequential(),
-    );
-    on<AdjustCartItemQuantityEvent>(
-      _onAdjustQuantity,
-      transformer: _sequential(),
-    );
-    on<ApplyRemoteCartEvent>(_onApplyRemoteCart, transformer: _sequential());
-    on<ClearCartEvent>(_onClearCart, transformer: _sequential());
-    on<ClearLocalCartEvent>(_onClearLocalCart, transformer: _sequential());
+    on<LoadCartEvent>(_onLoad);
+    on<AddToCartEvent>(_onAdd);
+    on<RemoveFromCartEvent>(_onRemove);
+    on<UpdateCartItemSizeEvent>(_onSize);
+    on<UpdateCartItemVariantEvent>(_onUpdateVariant);
+    on<UpdateCartItemQuantityEvent>(_onQty);
+    on<AdjustCartItemQuantityEvent>(_onAdjust);
+    on<ClearCartEvent>(_onClear);
+    on<ClearLocalCartEvent>(_onClearLocal);
+    on<ClearPaidRentalItemsEvent>(_onClearPaid);
     on<SetWardrobeKitDaysEvent>((event, emit) {
       emit(state.copyWith(wardrobeKitDays: event.kitDays));
     });
@@ -425,679 +595,1074 @@ class CartBloc extends Bloc<CartEvent, CartState> {
         wardrobeKitMaxGarments: event.maxGarments,
         wardrobeKitPrice: event.kitPrice,
         wardrobeCategory: event.wardrobeCategory,
+        wardrobeCategoryId: event.wardrobeCategoryId,
       ));
     });
     on<LockWardrobeCategoryEvent>((event, emit) {
       final category = event.wardrobeCategory.trim();
       if (category.isEmpty) return;
-      emit(state.copyWith(wardrobeCategory: category));
+      emit(state.copyWith(
+        wardrobeCategory: category,
+        wardrobeCategoryId: event.wardrobeCategoryId,
+      ));
     });
   }
 
   final CartRepository _repository;
-  Future<void>? _loadCartFuture;
+  Future<void> _ops = Future.value();
+  int _latestApplyId = 0;
+  final Map<String, Future<void>> _lineOps = {};
+  final Set<String> _inflightLines = {};
+  final Set<String> _qtyFlushing = {};
+  final Map<String, int> _desiredQty = {};
+  final List<Completer<RemoteCart>> _refreshWaiters = [];
 
-  /// Bumped on every local mutation / clear so stale POST responses are ignored.
-  int _mutationSeq = 0;
-
-  /// Serializes network upserts so only the latest intent is applied.
-  Future<void> _syncChain = Future<void>.value();
-
-  Future<void> _onLoadCart(LoadCartEvent event, Emitter<CartState> emit) async {
-    // Let in-flight POST reconciles finish so GET does not race them.
-    await _syncChain.catchError((_) {});
-
-    // Reuse existing in-memory cart when revisiting screens.
-    if (!event.forceRefresh && state.items.isNotEmpty) return;
-    if (_loadCartFuture != null) {
-      await _loadCartFuture;
-      return;
-    }
-
-    _loadCartFuture = _loadCartOnce(emit);
+  Future<void> _enqueue(Future<void> Function() action) async {
+    final previous = _ops;
+    final gate = Completer<void>();
+    _ops = gate.future;
+    await previous;
     try {
-      await _loadCartFuture;
+      await action();
     } finally {
-      _loadCartFuture = null;
+      if (!gate.isCompleted) gate.complete();
     }
   }
 
-  Future<void> _loadCartOnce(Emitter<CartState> emit) async {
+  Future<void> _enqueueLine(String key, Future<void> Function() action) async {
+    final previous = _lineOps[key] ?? Future.value();
+    final gate = Completer<void>();
+    _lineOps[key] = gate.future;
+    await previous;
     try {
-      _cartDebug(
-        'LoadCart START — local count=${state.items.length} '
-        'ids=[${_cartItemIds(state.items)}]',
-      );
-      await CartImageCache.instance.restore();
-      final remote = await _repository.getCart();
-      _cartDebug(
-        'GET /cart response — count=${remote.items.length} '
-        'ids=[${_remoteItemIds(remote.items)}]',
-      );
-      if (remote.items.isEmpty) {
-        // Keep non-sub category lock from session/kit setup even when cart
-        // has no garments yet (user may still be on screenshot / listing).
-        emit(state.copyWith(items: const []));
-        await CartImageCache.instance.clear();
-        _cartDebug('LoadCart DONE — local emptied (remote empty)');
-        return;
+      await action();
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+      if (identical(_lineOps[key], gate.future)) {
+        _lineOps.remove(key);
       }
-
-      final remoteMerged = remote.items
-          .map((item) => _mapRemoteItem(item, state.items))
-          .toList();
-      // Treat server cart as source-of-truth on load to avoid stale local ghost items.
-      // Re-apply non-sub category lock from session / inferred items after cold start.
-      final restoredCategory = state.wardrobeCategory ??
-          CheckoutSession.instance.wardrobeCategory ??
-          CartLimits.lockedWardrobeCategory(
-            state.copyWith(items: remoteMerged),
-          );
-
-      final kitMeta = _kitDetailsFromRemote(remote.items);
-      final restoredKitDays = kitMeta?.durationDays ??
-          (state.wardrobeKitDays > 0 ? state.wardrobeKitDays : null);
-      final restoredKitId = kitMeta?.wardrobeKitId ?? state.wardrobeKitId;
-      final restoredKitProductId =
-          kitMeta?.wardrobeKitProductId ?? state.wardrobeKitProductId;
-      final restoredKitName = (state.wardrobeKitName.trim().isNotEmpty)
-          ? state.wardrobeKitName
-          : (kitMeta?.kitType != null && kitMeta!.kitType!.trim().isNotEmpty
-              ? _titleCaseKitName(kitMeta.kitType!)
-              : null);
-
-      emit(state.copyWith(
-        items: remoteMerged,
-        wardrobeCategory: restoredCategory,
-        wardrobeKitDays: restoredKitDays,
-        wardrobeKitId: restoredKitId,
-        wardrobeKitProductId: restoredKitProductId,
-        wardrobeKitName: restoredKitName,
-      ));
-      _cartDebug(
-        'LoadCart DONE — final local count=${remoteMerged.length} '
-        'ids=[${_cartItemIds(remoteMerged)}] '
-        'groupEssentials=${state.copyWith(items: remoteMerged).shouldGroupEssentialsUnderWardrobe}',
-      );
-    } catch (e) {
-      _cartDebug('LoadCart FAILED — keeping local state. error=$e');
-      // Keep local cart when remote fetch fails.
     }
   }
 
-  Future<void> _onAddToCart(
-    AddToCartEvent event,
-    Emitter<CartState> emit,
-  ) async {
-    _cartDebug(
-      'AddToCart BEFORE — local count=${state.items.length} '
-      'ids=[${_cartItemIds(state.items)}] '
-      'adding=${event.item.productId}',
-    );
+  Set<String> _pendingPlus(String lineId) => {...state.pendingLineIds, lineId};
 
-    // Safety net: non-subscribers cannot mix wardrobe categories in one cart.
-    // UI should already block via tryAddToCart; this prevents direct AddToCartEvent bypass.
-    if (CartLimits.wouldViolateSingleCategoryRule(
-      state,
-      incomingCategory: event.item.category,
-      isEssential: event.item.isEssential,
-    )) {
-      _cartDebug('AddToCart BLOCKED — single-category rule');
+  Set<String> _pendingMinus(String lineId) {
+    final next = {...state.pendingLineIds}..remove(lineId);
+    return next;
+  }
+
+  void _emitClearPending(
+    Emitter<CartState> emit,
+    String lineId,
+    String source,
+  ) {
+    if (emit.isDone) {
+      _addUiLog('CLEAR LOADING skipped emit.done productKey=$lineId');
       return;
     }
-
-    if (!event.item.isEssential) {
-      final nextCount = _countAfterAdding(state, event.item);
-      final maxAllowed = CartLimits.effectiveMaxWardrobeGarments(state);
-      if (nextCount > maxAllowed) {
-        _cartDebug(
-          'AddToCart BLOCKED — wardrobe garment limit '
-          'next=$nextCount max=$maxAllowed '
-          'kitMax=${state.maxWardrobeGarments} '
-          'subRemaining=${SubscriptionCache.instance.remainingGarmentsBalance}',
-        );
-        return;
-      }
-    }
-
-    final existing = state.items.indexWhere(
-      (e) => _isSameCartLine(e, event.item),
-    );
-    final updatedList = List<CartItem>.from(state.items);
-    late CartItem syncedItem;
-    if (existing >= 0) {
-      syncedItem = updatedList[existing]
-          .copyWith(quantity: updatedList[existing].quantity + 1);
-      updatedList[existing] = syncedItem;
-    } else {
-      syncedItem = event.item;
-      updatedList.add(syncedItem);
-    }
-
-    // Lock the wardrobe category on first non-essential add (non-sub rule).
-    final shouldLockCategory = !event.item.isEssential &&
-        (state.wardrobeCategory == null ||
-            state.wardrobeCategory!.trim().isEmpty) &&
-        (event.item.category?.trim().isNotEmpty ?? false);
-
-    final newState = state.copyWith(
-      items: updatedList,
-      wardrobeCategory:
-          shouldLockCategory ? event.item.category : state.wardrobeCategory,
-    );
-    emit(newState);
-    _cartDebug(
-      'AddToCart AFTER optimistic emit — local count=${newState.items.length} '
-      'ids=[${_cartItemIds(newState.items)}]',
-    );
-    await CartImageCache.instance.remember(
-      syncedItem.imageUrl,
-      productId: syncedItem.productId,
-      variantId: syncedItem.variantId,
-    );
-    _enqueueSync(syncedItem);
-  }
-
-  Future<void> _onRemoveFromCart(
-    RemoveFromCartEvent event,
-    Emitter<CartState> emit,
-  ) async {
-    final removed = _findLineById(event.itemId);
-    if (removed == null) return;
-
-    final updatedList =
-        state.items.where((e) => e.id != removed.id).toList();
-    await CartImageCache.instance.forget(
-      productId: removed.productId,
-      variantId: removed.variantId,
-    );
-    late CartState optimistic;
-    if (updatedList.isEmpty) {
-      optimistic = const CartState();
-      emit(optimistic);
-      await CartImageCache.instance.clear();
-      CheckoutSession.instance.clearWardrobeCategoryLock();
-    } else {
-      final next = state.copyWith(items: updatedList);
-      final hasWardrobe = next.wardrobeItems.isNotEmpty;
-      optimistic = hasWardrobe
-          ? next
-          : next.copyWith(clearWardrobeKit: true);
-      emit(optimistic);
-      if (!hasWardrobe) {
-        CheckoutSession.instance.clearWardrobeCategoryLock();
-      }
-    }
-    // Use pre-remove snapshot for kitDetails payload on qty=0 upsert.
-    _enqueueSync(
-      removed.copyWith(quantity: 0),
-      quantityOverride: 0,
-      preserveKitFrom: optimistic,
-    );
-  }
-
-  Future<void> _onUpdateSize(
-    UpdateCartItemSizeEvent event,
-    Emitter<CartState> emit,
-  ) async {
-    final current = _findLineById(event.itemId);
-    if (current == null) return;
-
-    final updatedList = state.items.map((e) {
-      if (e.id == current.id) return e.copyWith(selectedSize: event.size);
-      return e;
-    }).toList();
-    final newState = state.copyWith(items: updatedList);
-    emit(newState);
-    final item = updatedList.firstWhere((e) => e.id == current.id);
-    _enqueueSync(item);
-  }
-
-  Future<void> _onAdjustQuantity(
-    AdjustCartItemQuantityEvent event,
-    Emitter<CartState> emit,
-  ) async {
-    final current = _findLineById(event.itemId);
-    if (current == null || event.delta == 0) return;
-
-    final nextQty = current.quantity + event.delta;
-    if (nextQty <= 0) {
-      await _onRemoveFromCart(RemoveFromCartEvent(current.id), emit);
+    if (!state.pendingLineIds.contains(lineId)) {
+      _addUiLog('CLEAR LOADING already-clear productKey=$lineId');
       return;
     }
-    await _onUpdateQuantity(
-      UpdateCartItemQuantityEvent(current.id, nextQty),
+    _addUiLog('CLEAR LOADING productKey=$lineId');
+    _emitLogged(
       emit,
+      state.copyWith(pendingLineIds: _pendingMinus(lineId)),
+      source,
     );
   }
 
-  Future<void> _onUpdateQuantity(
-    UpdateCartItemQuantityEvent event,
-    Emitter<CartState> emit,
-  ) async {
-    final current = _findLineById(event.itemId);
-    if (current == null) return;
-
-    if (event.quantity <= 0) {
-      await _onRemoveFromCart(RemoveFromCartEvent(current.id), emit);
-      return;
+  void _completeRefreshWaiters(RemoteCart remote, [Object? error, StackTrace? st]) {
+    final waiters = List<Completer<RemoteCart>>.from(_refreshWaiters);
+    _refreshWaiters.clear();
+    for (final waiter in waiters) {
+      if (waiter.isCompleted) continue;
+      if (error != null) {
+        waiter.completeError(error, st);
+      } else {
+        waiter.complete(remote);
+      }
     }
+  }
 
-    if (!current.isEssential && event.quantity > current.quantity) {
-      final nextWardrobeCount =
-          state.wardrobeGarmentCount + (event.quantity - current.quantity);
-      final maxAllowed = CartLimits.effectiveMaxWardrobeGarments(state);
-      if (nextWardrobeCount > maxAllowed) {
-        _cartDebug(
-          'UpdateQuantity BLOCKED — wardrobe garment limit '
-          'next=$nextWardrobeCount max=$maxAllowed',
-        );
-        return;
+  Future<RemoteCart> refresh({required String source}) {
+    final completer = Completer<RemoteCart>();
+    _refreshWaiters.add(completer);
+    add(LoadCartEvent(forceRefresh: true, source: source));
+    return completer.future;
+  }
+
+  void _emitLogged(Emitter<CartState> emit, CartState next, String source) {
+    _cartLog(
+      'CART_STATE status=${next.status.name} source=$source '
+      'subscription=${next.subscriptionGarmentCount} '
+      'non_subscription=${next.paidRentalGarmentCount} '
+      'essentials=${next.essentialsOnlyItems.fold<int>(0, (n, e) => n + e.quantity)} '
+      'kids=${next.kidsItems.fold<int>(0, (n, e) => n + e.quantity)} '
+      'total=${next.totalItems}',
+    );
+    emit(next);
+  }
+
+  Future<RemoteCart> _applyRemote(
+    Emitter<CartState> emit, {
+    required RemoteCart remote,
+    required String source,
+    int? expectedApplyId,
+    String? clearLineId,
+  }) async {
+    if (expectedApplyId != null && expectedApplyId != _latestApplyId) {
+      _perf(
+        'SKIP STALE APPLY expected=$expectedApplyId current=$_latestApplyId source=$source',
+      );
+      return state.remote;
+    }
+    final mapped = _mapRemote(remote);
+    final kit = _kitFrom(remote);
+    final pending = clearLineId == null
+        ? state.pendingLineIds
+        : ({...state.pendingLineIds}..remove(clearLineId));
+    final outOfStock = clearLineId == null
+        ? state.outOfStockLineIds
+        : ({...state.outOfStockLineIds}..remove(clearLineId));
+    if (clearLineId != null) {
+      _addUiLog('CLEAR LOADING productKey=$clearLineId source=$source');
+    }
+    final stateSw = Stopwatch()..start();
+    final resolvedMaxGarments = state.wardrobeKitMaxGarments > 0
+        ? state.wardrobeKitMaxGarments
+        : (WardrobeBookingSession.instance.kitGarmentLimit > 0
+            ? WardrobeBookingSession.instance.kitGarmentLimit
+            : SubscriptionKitPreferences.instance.wardrobeKitMaxGarments);
+
+    final preservedItems = <CartItem>[];
+    final existingItems = state.items;
+    final newItemsMap = {for (final item in mapped) item.id: item};
+    for (final existing in existingItems) {
+      if (newItemsMap.containsKey(existing.id)) {
+        preservedItems.add(newItemsMap[existing.id]!);
+        newItemsMap.remove(existing.id);
+      }
+    }
+    preservedItems.addAll(newItemsMap.values);
+
+    final nextState = state.copyWith(
+      status: CartStatus.loaded,
+      items: preservedItems,
+      remote: remote,
+      clearError: true,
+      wardrobeKitId: kit.kitId ?? state.wardrobeKitId,
+      wardrobeKitProductId: kit.productId ?? state.wardrobeKitProductId,
+      wardrobeKitDays: kit.days ?? state.wardrobeKitDays,
+      wardrobeKitName: kit.name ?? state.wardrobeKitName,
+      wardrobeKitMaxGarments:
+          resolvedMaxGarments > 0 ? resolvedMaxGarments : null,
+      pendingLineIds: pending,
+      outOfStockLineIds: outOfStock,
+    );
+    _emitLogged(emit, nextState, source);
+    stateSw.stop();
+    _perf(
+      'STATE UPDATE duration=${stateSw.elapsedMilliseconds}ms source=$source',
+    );
+    
+    // Clear stale Kids/Essentials session state if their cart items were removed
+    if (CheckoutSession.instance.bookingMode == CheckoutBookingMode.essentials) {
+      if (nextState.essentialsOnlyItems.isEmpty && nextState.kidsItems.isEmpty) {
+        _cartLog('CLEARING stale Essentials/Kids bookingMode because cart section is empty');
+        CheckoutSession.instance.clearEssentialsBookingMode();
       }
     }
 
-    final updatedList = state.items.map((e) {
-      if (e.id == current.id) return e.copyWith(quantity: event.quantity);
-      return e;
+    // Reset booking mode selection if cart transitions from having items to empty
+    if (state.items.isNotEmpty && remote.items.isEmpty) {
+      _cartLog('Cart transitioned from items -> zero items. Resetting booking mode selection.');
+      CheckoutSession.instance.clearBookingModeSelection();
+      WardrobeBookingSession.instance.startNewBooking();
+    }
+
+    _completeRefreshWaiters(remote);
+    return remote;
+  }
+
+  Future<RemoteCart> _getAuthoritative(
+    Emitter<CartState> emit, {
+    required String source,
+    int? applyId,
+    String? clearLineId,
+  }) async {
+    final expected = applyId ?? _latestApplyId;
+    final requestId = _repository.nextRequestId();
+    _perf('GET START requestId=$requestId source=$source');
+    _addUiLog('GET START productKey=${clearLineId ?? '-'}');
+    _cartLog('CART_API GET START requestId=$requestId source=$source');
+    final remote = await _repository.getCart(
+      requestId: requestId,
+      source: source,
+    );
+    _addUiLog('GET COMPLETE productKey=${clearLineId ?? '-'}');
+    return _applyRemote(
+      emit,
+      remote: remote,
+      source: 'GET response $requestId',
+      expectedApplyId: expected,
+      clearLineId: clearLineId,
+    );
+  }
+
+  ({String? kitId, String? productId, int? days, String? name}) _kitFrom(
+    RemoteCart remote,
+  ) {
+    for (final item in remote.items) {
+      final kit = item.kitDetails;
+      if (kit == null) continue;
+      return (
+        kitId: kit.wardrobeKitId,
+        productId: kit.wardrobeKitProductId,
+        days: kit.durationDays,
+        name: kit.kitType,
+      );
+    }
+    return (kitId: null, productId: null, days: null, name: null);
+  }
+
+  List<CartItem> _mapRemote(RemoteCart remote) {
+    return remote.items.map((item) {
+      final type = item.itemType;
+      if (type.isEmpty) {
+        _cartLog(
+          'GET item missing item_type productId=${item.productId} '
+          'name=${item.productName}',
+        );
+      }
+      final image = (item.imageUrl != null && item.imageUrl!.isNotEmpty)
+          ? item.imageUrl!
+          : '';
+      final isSub = type == 'subscription';
+      final effectiveUnitPrice = isSub ? 0 : item.unitPrice;
+      final price = effectiveUnitPrice > 0
+          ? '₹ ${effectiveUnitPrice.round()}'
+          : null;
+      return CartItem(
+        productId: item.productId,
+        variantId: item.variantId,
+        title: item.productName,
+        imageUrl: image,
+        price: price,
+        selectedSize: item.size ?? 'M',
+        quantity: item.quantity,
+        itemType: type,
+        category: item.categoryName,
+        productClass: item.productClass,
+        unitPrice: item.unitPrice,
+        lineTotal: item.lineTotal,
+        kitDetails: item.kitDetails,
+      );
     }).toList();
-    final newState = state.copyWith(items: updatedList);
-    emit(newState);
-    final item = updatedList.firstWhere((e) => e.id == current.id);
-    _enqueueSync(item);
   }
 
-  Future<void> _onClearCart(ClearCartEvent event, Emitter<CartState> emit) async {
-    _mutationSeq++;
-    final snapshot = state;
-    emit(const CartState());
-    await CartImageCache.instance.clear();
-    CheckoutSession.instance.clearWardrobeCategoryLock();
-    try {
-      await _repository.clearRemoteCart(snapshot);
-    } catch (_) {
-      // Local cart is already cleared; server sync can retry later.
-    }
-  }
-
-  /// Local-only wipe so previous user's cart never remains after logout/update.
-  Future<void> _onClearLocalCart(
-    ClearLocalCartEvent event,
-    Emitter<CartState> emit,
-  ) async {
-    _mutationSeq++;
-    emit(const CartState());
-    await CartImageCache.instance.clear();
-    CheckoutSession.instance.clearWardrobeCategoryLock();
-  }
-
-  Future<void> _onApplyRemoteCart(
-    ApplyRemoteCartEvent event,
-    Emitter<CartState> emit,
-  ) async {
-    if (event.seq != _mutationSeq) {
-      _cartDebug(
-        'ApplyRemoteCart SKIPPED — stale seq=${event.seq} current=$_mutationSeq',
-      );
-      return;
-    }
-
-    final remote = event.remote;
-    _cartDebug(
-      'ApplyRemoteCart — count=${remote.items.length} '
-      'ids=[${_remoteItemIds(remote.items)}]',
-    );
-
-    // Cart was cleared while this sync was in flight.
-    if (state.isEmpty && remote.items.isNotEmpty) {
-      _cartDebug('ApplyRemoteCart SKIPPED — local cart already cleared');
-      return;
-    }
-
-    final metadataSource = event.preserveKitFrom ?? state;
-    final mapped = remote.items
-        .map((e) => _mapRemoteItem(e, state.items))
-        .toList();
-
-    if (mapped.isEmpty) {
-      emit(const CartState());
-      _cartDebug('AFTER reconcile from POST — local emptied (remote empty)');
-      return;
-    }
-
-    final hasWardrobe = mapped.any((e) => !e.isEssential) ||
-        (metadataSource.wardrobeKitId?.trim().isNotEmpty ?? false) ||
-        (metadataSource.wardrobeCategory?.trim().isNotEmpty ?? false);
-    final nextState = hasWardrobe
-        ? metadataSource.copyWith(items: mapped)
-        : metadataSource.copyWith(items: mapped, clearWardrobeKit: true);
-
-    if (state.isEmpty && nextState.items.isNotEmpty) {
-      _cartDebug(
-        'ApplyRemoteCart SKIPPED after map — local cart cleared',
-      );
-      return;
-    }
-
-    if (event.seq != _mutationSeq) {
-      _cartDebug(
-        'ApplyRemoteCart SKIPPED before emit — superseded seq=${event.seq}',
-      );
-      return;
-    }
-
-    emit(nextState);
-    _cartDebug(
-      'AFTER reconcile from POST — local count=${nextState.items.length} '
-      'ids=[${_cartItemIds(nextState.items)}] '
-      'postCount=${remote.items.length} '
-      'mismatch=${nextState.items.length != remote.items.length}',
-    );
-  }
-
-  /// Queues a POST /cart without blocking the next optimistic mutation.
-  void _enqueueSync(
-    CartItem item, {
-    int? quantityOverride,
-    CartState? preserveKitFrom,
-  }) {
-    final seq = ++_mutationSeq;
-    _syncChain = _syncChain.catchError((_) {}).then((_) async {
-      if (seq != _mutationSeq) {
-        _cartDebug(
-          'POST /cart skipped before send — seq=$seq current=$_mutationSeq',
-        );
+  Future<void> _onLoad(LoadCartEvent event, Emitter<CartState> emit) async {
+    await _enqueue(() async {
+      if (!event.forceRefresh &&
+          (state.status == CartStatus.loading ||
+              state.status == CartStatus.loaded ||
+              state.status == CartStatus.updating)) {
+        _cartLog('GET skipped already-loaded source=${event.source}');
         return;
       }
-
-      var toSend = item;
-      var qty = quantityOverride;
-      if (quantityOverride == null) {
-        final live = _findLineMatching(item);
-        if (live == null) {
-          toSend = item.copyWith(quantity: 0);
-          qty = 0;
-        } else {
-          toSend = live;
-          qty = live.quantity;
-        }
+      if (state.items.isEmpty) {
+        _emitLogged(
+          emit,
+          state.copyWith(status: CartStatus.loading),
+          'GET loading ${event.source}',
+        );
+      } else {
+        _emitLogged(
+          emit,
+          state.copyWith(status: CartStatus.updating),
+          'GET updating ${event.source}',
+        );
       }
-
       try {
-        final remote = await _repository.upsertItem(
-          item: toSend,
-          cartState: preserveKitFrom ?? state,
-          quantity: qty,
-        );
-        if (seq != _mutationSeq) {
-          _cartDebug(
-            'POST /cart response ignored — seq=$seq current=$_mutationSeq',
-          );
-          return;
-        }
-        add(
-          ApplyRemoteCartEvent(
-            remote: remote,
-            seq: seq,
-            preserveKitFrom: preserveKitFrom,
+        await _getAuthoritative(emit, source: event.source);
+      } catch (e, st) {
+        _completeRefreshWaiters(state.remote, e, st);
+        _emitLogged(
+          emit,
+          state.copyWith(
+            status: state.items.isEmpty ? CartStatus.error : CartStatus.loaded,
+            errorMessage: e.toString(),
           ),
-        );
-      } catch (e) {
-        _cartDebug(
-          'POST /cart FAILED — keeping optimistic local state. error=$e',
+          'GET error ${event.source}',
         );
       }
     });
   }
 
-  CartItem? _findLineById(String itemId) {
-    final id = itemId.trim();
-    if (id.isEmpty) return null;
-
-    for (final item in state.items) {
-      if (item.id == id) return item;
-    }
-    for (final item in state.items) {
-      if (item.productId == id) return item;
-      final vid = item.variantId?.trim();
-      if (vid != null && vid.isNotEmpty && id == '${item.productId}_$vid') {
-        return item;
-      }
-    }
-    return null;
-  }
-
-  CartItem? _findLineMatching(CartItem target) {
-    for (final item in state.items) {
-      if (_isSameCartLine(item, target)) return item;
-    }
-    return null;
-  }
-
-  CartItem? _findLocalForRemote(
-    RemoteCartItem remote,
-    List<CartItem> existing,
-  ) {
-    final pid = remote.productId.trim();
-    if (pid.isEmpty) return null;
-
-    final remoteVariant = remote.variantId?.trim();
-    if (remoteVariant != null && remoteVariant.isNotEmpty) {
-      for (final item in existing) {
-        if (item.productId == pid && item.variantId == remoteVariant) {
-          return item;
-        }
-        if (item.id == '${pid}_$remoteVariant') return item;
-      }
-    }
-
-    final byProduct =
-        existing.where((item) => item.productId == pid).toList(growable: false);
-    if (byProduct.isEmpty) return null;
-    // Remote often omits/changes variantId after POST; keep the local line so
-    // listing cards that key off productId_variantId stay matched.
-    if (byProduct.length == 1 ||
-        remoteVariant == null ||
-        remoteVariant.isEmpty) {
-      return byProduct.first;
-    }
-    return byProduct.first;
-  }
-
-  /// True when [a] and [b] represent the same cart line across optimistic/remote ids.
-  bool _isSameCartLine(CartItem a, CartItem b) {
-    if (a.id == b.id) return true;
-    if (a.productId.trim() != b.productId.trim()) return false;
-    final av = a.variantId?.trim();
-    final bv = b.variantId?.trim();
-    if (av != null && av.isNotEmpty && bv != null && bv.isNotEmpty) {
-      return av == bv;
-    }
-    // Missing variant on either side — treat same product as same line.
-    return true;
-  }
-
-  CartItem _mapRemoteItem(RemoteCartItem remote, List<CartItem> existing) {
-    final local = _findLocalForRemote(remote, existing);
-    final resolvedVariantId =
-        (remote.variantId != null && remote.variantId!.trim().isNotEmpty)
-            ? remote.variantId!.trim()
-            : local?.variantId;
-
-    final cachedProduct = ProductCache.instance.findById(remote.productId);
-    final imageUrl = _resolveCartImageUrl(
-      productId: remote.productId,
-      variantId: resolvedVariantId,
-      localImageUrl: local?.imageUrl,
-      product: cachedProduct,
+  Future<RemoteCart> _writeThenGet(
+    Emitter<CartState> emit, {
+    required CartWriteRequest request,
+    required String source,
+    String? postedType,
+    String? productName,
+    String? lineId,
+  }) async {
+    _perf('REQUEST START source=$source productId=${request.productId}');
+    final postId = _repository.nextRequestId();
+    final result = await _repository.upsert(
+      request: request,
+      requestId: postId,
+      source: source,
     );
-
-    final fallbackCategory = cachedProduct?.categoryName;
-
-    final fallback = local ??
-        CartItem(
-          id: remote.productId,
-          productId: remote.productId,
-          variantId: resolvedVariantId,
-          title: remote.productName,
-          imageUrl: imageUrl,
-          category: fallbackCategory,
-        );
-
-    final id = resolvedVariantId != null && resolvedVariantId.isNotEmpty
-        ? '${remote.productId}_$resolvedVariantId'
-        : (local?.id ?? remote.productId);
-
-    if (imageUrl.isNotEmpty) {
-      // Fire-and-forget: keep cold-start thumbnails aligned with last known URL.
-      CartImageCache.instance.remember(
-        imageUrl,
-        productId: remote.productId,
-        variantId: resolvedVariantId,
+    _perf(
+      'REQUEST END duration=${result.durationMs}ms source=$source',
+    );
+    _addUiLog('POST COMPLETE productKey=${lineId ?? request.productId}');
+    final completedId = ++_latestApplyId;
+    late final RemoteCart remote;
+    if (result.isAuthoritative) {
+      _perf('GET SKIPPED reason=POST_AUTHORITATIVE source=$source');
+      _addUiLog(
+        'GET COMPLETE productKey=${lineId ?? request.productId} skipped=true',
+      );
+      remote = await _applyRemote(
+        emit,
+        remote: result.remote,
+        source: '$source.postCart',
+        clearLineId: lineId,
+      );
+    } else {
+      remote = await _getAuthoritative(
+        emit,
+        source: '$source.afterPost',
+        applyId: completedId,
+        clearLineId: lineId,
       );
     }
 
-    return CartItem(
-      id: id,
-      productId: remote.productId,
-      variantId: resolvedVariantId,
-      title: remote.productName,
-      imageUrl: imageUrl,
-      price: _formatRemoteUnitPrice(remote.unitPrice),
-      selectedSize: fallback.selectedSize,
-      quantity: remote.quantity,
-      isEssential: _resolveIsEssential(
-        local: local,
-        remote: remote,
-        product: cachedProduct,
-      ),
-      // Preserve wardrobe category for non-sub single-category lock across reloads.
-      category: (fallback.category != null &&
-              fallback.category!.trim().isNotEmpty)
-          ? fallback.category
-          : fallbackCategory,
+    final matched = remote.items.any((item) =>
+        item.productId == request.productId &&
+        _variantsCompatible(item.variantId, request.variantId));
+    _addUiLog(
+      'CART MATCH productKey=${lineId ?? request.productId} $matched',
+    );
+
+    if (postedType != null && request.quantity > 0) {
+      if (result.isAuthoritative) {
+        _cartLog(
+          'TYPE CHECK product=${productName ?? request.productId} '
+          'POST=$postedType GET=SKIPPED reason=POST_AUTHORITATIVE '
+          'status=NOT_APPLICABLE',
+        );
+        return remote;
+      }
+      RemoteCartItem? found;
+      for (final item in remote.items) {
+        if (item.productId == request.productId &&
+            (request.variantId == null ||
+                (item.variantId ?? '') == (request.variantId ?? ''))) {
+          found = item;
+          if (item.itemType == postedType) break;
+        }
+      }
+      final got = found?.itemType ?? '-';
+      if (postedType != got) {
+        _cartLog(
+          'BACKEND TYPE MISMATCH product=${productName ?? request.productId} '
+          'POST=$postedType GET=$got — Flutter will not rewrite GET',
+        );
+      } else {
+        _cartLog(
+          'TYPE CHECK product=${productName ?? request.productId} '
+          'POST=$postedType GET=$got status=MATCH',
+        );
+      }
+    }
+    return remote;
+  }
+
+  String _resolveAddType(CartItem item) {
+    var type = item.itemType.trim();
+    if (type.isEmpty) {
+      if (item.isKids || isKidsCategory(item.category)) {
+        type = 'kids';
+      } else if (item.isEssential || isEssentialCategory(item.category)) {
+        type = 'essentials';
+      }
+    }
+    if (type.isEmpty && kDebugMode) {
+      debugPrint(
+        '[CART_ITEM_TYPE] BACKEND MISSING REQUIRED FIELD: item_type in product catalog payload',
+      );
+    }
+    return type;
+  }
+
+  Future<CartWriteRequest> _buildKitWriteRequest({
+    required String itemType,
+    required String targetProductId,
+    required String? targetVariantId,
+    required int targetQuantity,
+    required String? targetSize,
+    required String? targetCategory,
+    required String? targetProductClass,
+    required String? targetProductName,
+    String? lineIdToSkip,
+  }) async {
+    if (itemType != 'subscription' && itemType != 'non_subscription') {
+      return CartWriteRequest(
+        productId: targetProductId,
+        variantId: targetVariantId,
+        quantity: targetQuantity,
+        itemType: itemType,
+        size: targetSize,
+        categoryName: targetCategory,
+        productClass: targetProductClass,
+        productName: targetProductName,
+      );
+    }
+
+    final garments = <Map<String, dynamic>>[];
+    final existingGarments = state.items.where((i) {
+      if (i.itemType != itemType) return false;
+      if (i.isKids || isKidsCategory(i.category)) return false;
+      if (i.isEssential || isEssentialCategory(i.category)) return false;
+      return true;
+    });
+    
+    for (final g in existingGarments) {
+      if (lineIdToSkip != null && g.id == lineIdToSkip) {
+        continue;
+      }
+      if (g.productId == targetProductId &&
+          (g.variantId ?? '') == (targetVariantId ?? '')) {
+        continue;
+      }
+      garments.add({
+        'productId': g.productId,
+        'quantity': g.quantity,
+        'variantId': g.variantId,
+        'size': g.selectedSize,
+        'product_name': g.productName,
+        'price': g.unitPrice,
+        'primary_image_url': g.imageUrl,
+      });
+    }
+
+    if (targetQuantity > 0) {
+      garments.add({
+        'productId': targetProductId,
+        'quantity': targetQuantity,
+        'variantId': targetVariantId,
+        'size': targetSize,
+        'product_name': targetProductName,
+      });
+    }
+
+    String? kitProductId;
+    String? kitId;
+    int? durationDays;
+    String? kitName;
+
+    if (existingGarments.isNotEmpty) {
+      final existingKit = existingGarments.first.kitDetails;
+      kitProductId = existingKit?.wardrobeKitProductId;
+      kitId = existingKit?.wardrobeKitId;
+      durationDays = existingKit?.durationDays;
+      kitName = existingKit?.kitType;
+    }
+
+    final kit = await _repository.subscriptionKitDetails(
+      wardrobeKitId: kitId ?? state.wardrobeKitId,
+      wardrobeKitProductId: kitProductId ?? state.wardrobeKitProductId,
+      durationDays: durationDays ?? state.wardrobeKitDays,
+      kitName: kitName ?? state.wardrobeKitName,
+      selectedItems: garments,
+    );
+
+    if (kit != null) {
+      kit['non_subscription'] = itemType == 'non_subscription';
+      kit['cart_section'] = itemType;
+    }
+    
+    if (kitProductId == null || kitProductId.isEmpty) {
+      return CartWriteRequest(
+        productId: targetProductId,
+        variantId: targetVariantId,
+        quantity: targetQuantity,
+        itemType: itemType,
+        size: targetSize,
+        categoryName: targetCategory,
+        kitDetails: kit,
+        productClass: targetProductClass,
+        productName: targetProductName,
+      );
+    }
+
+    return CartWriteRequest(
+      productId: kitProductId,
+      variantId: null,
+      quantity: garments.isEmpty ? 0 : 1,
+      itemType: itemType,
+      kitDetails: kit,
+      productClass: 'wardrobe_kit',
+      productName: state.wardrobeKitName ?? 'Wardrobe Kit',
     );
   }
 
-  bool _resolveIsEssential({
-    required CartItem? local,
-    required RemoteCartItem remote,
-    Product? product,
-  }) {
-    if (local != null) return local.isEssential;
-    // Kit-linked lines are wardrobe garments.
-    if (remote.kitDetails != null) return false;
-    if (product != null) {
-      if (ProductCatalog.isDirectPurchaseProduct(product)) return true;
-      if (product.isWardrobeKit) return false;
-      // Catalog single_item under a home wardrobe category is a garment.
-      return false;
+  Future<void> _onAdd(AddToCartEvent event, Emitter<CartState> emit) async {
+    if (!isApiUuid(event.item.productId)) return;
+    final type = _resolveAddType(event.item);
+    final key = _lineId(event.item.productId, event.item.variantId, type);
+    if (_inflightLines.contains(key) || state.pendingLineIds.contains(key)) {
+      _perf('ADD SKIP duplicate line=$key');
+      return;
     }
-    // Without catalog, prefer wardrobe so category lock still applies.
-    return false;
-  }
-
-  String _formatRemoteUnitPrice(num unitPrice) {
-    if (unitPrice == unitPrice.roundToDouble()) {
-      return unitPrice.round().toString();
-    }
-    return unitPrice.toString();
-  }
-
-  RemoteCartKitDetails? _kitDetailsFromRemote(List<RemoteCartItem> items) {
-    for (final item in items) {
-      if (item.kitDetails != null) return item.kitDetails;
-    }
-    return null;
-  }
-
-  String _titleCaseKitName(String raw) {
-    final cleaned = raw.trim().replaceAll('_', ' ');
-    if (cleaned.isEmpty) return cleaned;
-    return cleaned
-        .split(RegExp(r'\s+'))
-        .map((part) {
-          if (part.isEmpty) return part;
-          return '${part[0].toUpperCase()}${part.substring(1).toLowerCase()}';
-        })
-        .join(' ');
-  }
-
-  /// Resolve thumbnail for a remote cart line.
-  ///
-  /// Priority: in-memory local → persisted add-time URL → variant image →
-  /// same-color sibling variant → product primary / first gallery image.
-  String _resolveCartImageUrl({
-    required String productId,
-    String? variantId,
-    String? localImageUrl,
-    Product? product,
-  }) {
-    final local = localImageUrl?.trim() ?? '';
-    if (local.isNotEmpty) return local;
-
-    final remembered = CartImageCache.instance.get(
-      productId: productId,
-      variantId: variantId,
+    final opSw = Stopwatch()..start();
+    _perf('ADD START line=$key product=${event.item.title}');
+    _addUiLog('START productKey=$key');
+    _inflightLines.add(key);
+    _emitLogged(
+      emit,
+      state.copyWith(pendingLineIds: _pendingPlus(key)),
+      'AddToCart pending',
     );
-    if (remembered != null && remembered.isNotEmpty) return remembered;
-
-    if (product == null) return '';
-
-    ProductVariant? matched;
-    final vid = variantId?.trim();
-    if (vid != null && vid.isNotEmpty) {
-      for (final variant in product.variants) {
-        if (variant.id == vid) {
-          matched = variant;
-          break;
-        }
+    try {
+      await _enqueueLine(key, () => _handleAdd(event, emit, type: type));
+    } catch (e) {
+      _addUiLog('CLEAR LOADING productKey=$key error=true');
+      final message = e is ApiException ? e.message : e.toString();
+      final isOos = cartVariantOutOfStockMessage(message);
+      final isQuota = !isOos && isSubscriptionQuotaError(message);
+      if (isOos) {
+        logCartStockOut(
+          productId: event.item.productId,
+          variantId: event.item.variantId,
+          size: event.item.selectedSize,
+          message: message,
+        );
       }
-    }
-
-    final fromVariant = matched?.primaryImageUrl?.trim() ?? '';
-    if (fromVariant.isNotEmpty) return fromVariant;
-
-    if (matched != null) {
-      final color = _variantOption(matched.options, 'Color');
-      if (color != null && color.isNotEmpty) {
-        for (final variant in product.variants) {
-          final otherColor = _variantOption(variant.options, 'Color');
-          if (otherColor == null ||
-              otherColor.toUpperCase() != color.toUpperCase()) {
-            continue;
-          }
-          final url = variant.primaryImageUrl?.trim() ?? '';
-          if (url.isNotEmpty) return url;
-        }
+      if (isQuota) {
+        logCartQuota(SubscriptionQuotaDetails.parse(message));
       }
+      _emitLogged(
+        emit,
+        state.copyWith(
+          status: CartStatus.loaded,
+          errorMessage: isOos ? null : message,
+          pendingLineIds: _pendingMinus(key),
+          outOfStockLineIds: isOos
+              ? {...state.outOfStockLineIds, key}
+              : state.outOfStockLineIds,
+        ),
+        'AddToCart error',
+      );
+    } finally {
+      _inflightLines.remove(key);
+      _emitClearPending(emit, key, 'AddToCart done');
+      opSw.stop();
+      _perf(
+        'UI COMPLETE duration=${opSw.elapsedMilliseconds}ms op=ADD line=$key',
+      );
     }
-
-    final primary = product.primaryImageUrl?.trim() ?? '';
-    if (primary.isNotEmpty) return primary;
-    if (product.imageUrls.isNotEmpty) {
-      return product.imageUrls.first.trim();
-    }
-    return '';
   }
 
-  String? _variantOption(Map<String, String> options, String key) {
-    for (final entry in options.entries) {
-      if (entry.key.toLowerCase() == key.toLowerCase()) {
-        final value = entry.value.trim();
-        return value.isEmpty ? null : value;
-      }
-    }
-    return null;
-  }
-
-  static int _countAfterAdding(CartState state, CartItem item) {
+  Future<void> _handleAdd(
+    AddToCartEvent event,
+    Emitter<CartState> emit, {
+    required String type,
+  }) async {
+    debugPrint('===== CART ADD VARIANT =====');
+    debugPrint('productId = ${event.item.productId}');
+    debugPrint('variantId = ${event.item.variantId}');
+    debugPrint('variantName = ${event.item.title}');
+    
     final existing = state.lineForProduct(
-      item.productId,
-      variantId: item.variantId,
+      event.item.productId,
+      variantId: event.item.variantId,
+      itemType: type,
     );
-    if (existing != null) {
-      return state.wardrobeGarmentCount + 1;
-    }
-    return state.wardrobeGarmentCount + item.quantity;
+    final qty = (existing?.quantity ?? 0) + 1;
+    final request = await _buildKitWriteRequest(
+      itemType: type,
+      targetProductId: event.item.productId,
+      targetVariantId: event.item.variantId,
+      targetQuantity: qty,
+      targetSize: event.item.selectedSize,
+      targetCategory: event.item.category,
+      targetProductClass: event.item.productClass ?? 'single_item',
+      targetProductName: event.item.title,
+    );
+
+    await _writeThenGet(
+      emit,
+      request: request,
+      source: 'AddToCart',
+      postedType: type,
+      productName: event.item.title,
+      lineId: _lineId(event.item.productId, event.item.variantId, type),
+    );
   }
+
+  CartItem? _line(String itemId) {
+    for (final item in state.items) {
+      if (item.id == itemId) return item;
+    }
+    return null;
+  }
+
+  Future<void> _onRemove(
+    RemoveFromCartEvent event,
+    Emitter<CartState> emit,
+  ) async {
+    final item = _line(event.itemId);
+    if (item == null) return;
+    _desiredQty[item.id] = 0;
+    if (_qtyFlushing.contains(item.id)) {
+      _perf('DELETE COALESCE to qty=0 line=${item.id}');
+      return;
+    }
+    if (_inflightLines.contains(item.id) ||
+        state.pendingLineIds.contains(item.id)) {
+      _perf('DELETE SKIP duplicate line=${item.id}');
+      return;
+    }
+    final opSw = Stopwatch()..start();
+    _perf('DELETE START line=${item.id} product=${item.title}');
+    _inflightLines.add(item.id);
+    _emitLogged(
+      emit,
+      state.copyWith(pendingLineIds: _pendingPlus(item.id)),
+      'RemoveFromCart pending',
+    );
+    try {
+      await _enqueueLine(item.id, () => _handleRemove(item.id, emit));
+    } catch (e) {
+      _emitLogged(
+        emit,
+        state.copyWith(
+          status: CartStatus.loaded,
+          errorMessage: e.toString(),
+          pendingLineIds: _pendingMinus(item.id),
+        ),
+        'RemoveFromCart error',
+      );
+    } finally {
+      _inflightLines.remove(item.id);
+      _emitClearPending(emit, item.id, 'RemoveFromCart done');
+      opSw.stop();
+      _perf(
+        'UI COMPLETE duration=${opSw.elapsedMilliseconds}ms op=DELETE line=${item.id}',
+      );
+    }
+  }
+
+  Future<void> _handleRemove(String itemId, Emitter<CartState> emit) async {
+    final item = _line(itemId);
+    if (item == null) return;
+    _desiredQty.remove(item.id);
+    _perf('UPDATE/POST START op=DELETE line=$itemId');
+    
+    final request = await _buildKitWriteRequest(
+      itemType: item.itemType,
+      targetProductId: item.productId,
+      targetVariantId: item.variantId,
+      targetQuantity: 0,
+      targetSize: item.selectedSize,
+      targetCategory: item.categoryName,
+      targetProductClass: item.productClass ?? 'single_item',
+      targetProductName: item.productName,
+      lineIdToSkip: item.id,
+    );
+
+    await _writeThenGet(
+      emit,
+      request: request,
+      source: 'RemoveFromCart',
+      lineId: item.id,
+    );
+  }
+
+  Future<void> _onSize(
+    UpdateCartItemSizeEvent event,
+    Emitter<CartState> emit,
+  ) async {
+    final item = _line(event.itemId);
+    if (item == null) return;
+    if (_inflightLines.contains(item.id)) return;
+    _inflightLines.add(item.id);
+    _emitLogged(
+      emit,
+      state.copyWith(pendingLineIds: _pendingPlus(item.id)),
+      'UpdateSize pending',
+    );
+    try {
+      await _enqueueLine(item.id, () => _handleSize(event, emit));
+    } catch (e) {
+      _emitLogged(
+        emit,
+        state.copyWith(
+          status: CartStatus.loaded,
+          errorMessage: e.toString(),
+          pendingLineIds: _pendingMinus(item.id),
+        ),
+        'UpdateSize error',
+      );
+    } finally {
+      _inflightLines.remove(item.id);
+      _emitClearPending(emit, item.id, 'UpdateSize done');
+    }
+  }
+
+  Future<void> _handleSize(
+    UpdateCartItemSizeEvent event,
+    Emitter<CartState> emit,
+  ) async {
+    final item = _line(event.itemId);
+    if (item == null) return;
+
+    int targetQty = item.quantity;
+    String? newVariantId = item.variantId;
+    String? newVariantName = item.productName;
+    String? oldColor;
+
+    final product = ProductCache.instance.findById(item.productId);
+    if (product != null && item.variantId != null) {
+      final oldVariant = product.variants.where((v) => v.id == item.variantId).firstOrNull;
+      if (oldVariant != null) {
+        oldColor = ProductMapper.optionValue(oldVariant, 'Color');
+      }
+
+      final newVariant = ProductMapper.matchingVariant(
+        variants: product.variants,
+        selectedColor: oldColor,
+        selectedSize: event.size,
+      );
+
+      if (newVariant != null) {
+        newVariantId = newVariant.id;
+        newVariantName = newVariant.variantName;
+        
+        if (targetQty > newVariant.stockOnHand && newVariant.stockOnHand > 0) {
+          targetQty = newVariant.stockOnHand;
+        }
+
+        debugPrint('===== CART SIZE CHANGED =====');
+        debugPrint('OLD VARIANT ID = ${item.variantId}');
+        debugPrint('SELECTED SIZE = ${event.size}');
+        debugPrint('SELECTED COLOR = $oldColor');
+        debugPrint('RESOLVED VARIANT ID = ${newVariant.id}');
+        debugPrint('RESOLVED VARIANT NAME = ${newVariant.variantName}');
+        debugPrint('RESOLVED STOCK = ${newVariant.stockOnHand}');
+        debugPrint('==============================');
+      }
+    }
+
+    final request = await _buildKitWriteRequest(
+      itemType: item.itemType,
+      targetProductId: item.productId,
+      targetVariantId: newVariantId,
+      targetQuantity: targetQty,
+      targetSize: event.size,
+      targetCategory: item.categoryName,
+      targetProductClass: item.productClass ?? 'single_item',
+      targetProductName: newVariantName,
+      lineIdToSkip: item.id,
+    );
+
+    _perf('UPDATE/POST START op=SIZE line=${event.itemId} size=${event.size}');
+    await _writeThenGet(
+      emit,
+      request: request,
+      source: 'UpdateSize',
+      lineId: item.id,
+    );
+  }
+
+  Future<void> _onUpdateVariant(
+    UpdateCartItemVariantEvent event,
+    Emitter<CartState> emit,
+  ) async {
+    final item = _line(event.itemId);
+    if (item == null) return;
+    if (_inflightLines.contains(item.id)) return;
+    _inflightLines.add(item.id);
+    _emitLogged(
+      emit,
+      state.copyWith(pendingLineIds: _pendingPlus(item.id)),
+      'UpdateVariant pending',
+    );
+    try {
+      await _enqueueLine(item.id, () => _handleUpdateVariant(event, emit));
+    } catch (e) {
+      _emitLogged(
+        emit,
+        state.copyWith(
+          status: CartStatus.loaded,
+          errorMessage: e.toString(),
+          pendingLineIds: _pendingMinus(item.id),
+        ),
+        'UpdateVariant error',
+      );
+    } finally {
+      _inflightLines.remove(item.id);
+      _emitClearPending(emit, item.id, 'UpdateVariant done');
+    }
+  }
+
+  Future<void> _handleUpdateVariant(
+    UpdateCartItemVariantEvent event,
+    Emitter<CartState> emit,
+  ) async {
+    final item = _line(event.itemId);
+    if (item == null) return;
+
+    if (item.variantId == event.newVariant.id) return;
+
+    int targetQty = item.quantity;
+    if (targetQty > event.newVariant.stockOnHand && event.newVariant.stockOnHand > 0) {
+      targetQty = event.newVariant.stockOnHand;
+    }
+    if (targetQty < 1) targetQty = 1;
+
+    final newSize = ProductMapper.optionValue(event.newVariant, 'Size') ?? item.selectedSize;
+    final newColor = ProductMapper.optionValue(event.newVariant, 'Color');
+
+    debugPrint('===== CART VARIANT CHANGE =====');
+    debugPrint('PRODUCT ID = ${item.productId}');
+    debugPrint('OLD VARIANT ID = ${item.variantId}');
+    debugPrint('OLD VARIANT NAME = ${item.productName}');
+    debugPrint('SELECTED SIZE = $newSize');
+    debugPrint('SELECTED COLOR = $newColor');
+    debugPrint('NEW VARIANT ID = ${event.newVariant.id}');
+    debugPrint('NEW VARIANT NAME = ${event.newVariant.variantName}');
+    debugPrint('NEW STOCK = ${event.newVariant.stockOnHand}');
+    debugPrint('CURRENT QTY = ${item.quantity}');
+    debugPrint('FINAL QTY = $targetQty');
+    debugPrint('===============================');
+
+    final request = await _buildKitWriteRequest(
+      itemType: item.itemType,
+      targetProductId: item.productId,
+      targetVariantId: event.newVariant.id,
+      targetQuantity: targetQty,
+      targetSize: newSize,
+      targetCategory: item.categoryName,
+      targetProductClass: item.productClass ?? 'single_item',
+      targetProductName: event.newVariant.variantName,
+      lineIdToSkip: item.id,
+    );
+
+    _perf('UPDATE/POST START op=VARIANT line=${event.itemId}');
+    await _writeThenGet(
+      emit,
+      request: request,
+      source: 'UpdateVariant',
+      lineId: item.id,
+    );
+  }
+
+  Future<void> _flushQty(String itemId, Emitter<CartState> emit) async {
+    while (true) {
+      final item = _line(itemId);
+      final desired = _desiredQty[itemId];
+      if (item == null || desired == null) return;
+      if (desired == item.quantity) {
+        _desiredQty.remove(itemId);
+        return;
+      }
+      if (desired <= 0) {
+        _desiredQty.remove(itemId);
+        await _handleRemove(itemId, emit);
+        return;
+      }
+      final request = await _buildKitWriteRequest(
+        itemType: item.itemType,
+        targetProductId: item.productId,
+        targetVariantId: item.variantId,
+        targetQuantity: desired,
+        targetSize: item.selectedSize,
+        targetCategory: item.categoryName,
+        targetProductClass: item.productClass ?? 'single_item',
+        targetProductName: item.productName,
+        lineIdToSkip: item.id,
+      );
+
+      await _writeThenGet(
+        emit,
+        request: request,
+        source: 'UpdateQuantity',
+        lineId: itemId,
+      );
+    }
+  }
+
+  Future<void> _onQty(
+    UpdateCartItemQuantityEvent event,
+    Emitter<CartState> emit,
+  ) async {
+    final item = _line(event.itemId);
+    if (item == null) return;
+    if (state.isLinePending(item.id) && !_qtyFlushing.contains(item.id)) {
+      return;
+    }
+    _desiredQty[item.id] = event.quantity;
+    _perf('QUANTITY START line=${item.id} desired=${event.quantity}');
+    if (_qtyFlushing.contains(item.id)) {
+      _perf('QUANTITY COALESCE line=${item.id} desired=${event.quantity}');
+      return;
+    }
+    await _runQtyFlush(item.id, emit);
+  }
+
+  Future<void> _onAdjust(
+    AdjustCartItemQuantityEvent event,
+    Emitter<CartState> emit,
+  ) async {
+    final item = _line(event.itemId);
+    if (item == null || event.delta == 0) return;
+    if (state.isLinePending(item.id) && !_qtyFlushing.contains(item.id)) {
+      return;
+    }
+    final next = (_desiredQty[item.id] ?? item.quantity) + event.delta;
+    _desiredQty[item.id] = next;
+    _perf(
+      'QUANTITY START line=${item.id} desired=$next delta=${event.delta}',
+    );
+    if (_qtyFlushing.contains(item.id)) {
+      _perf('QUANTITY COALESCE line=${item.id} desired=$next');
+      return;
+    }
+    await _runQtyFlush(item.id, emit);
+  }
+
+  Future<void> _runQtyFlush(String itemId, Emitter<CartState> emit) async {
+    final opSw = Stopwatch()..start();
+    _qtyFlushing.add(itemId);
+    if (!_inflightLines.contains(itemId)) {
+      _inflightLines.add(itemId);
+      _emitLogged(
+        emit,
+        state.copyWith(pendingLineIds: _pendingPlus(itemId)),
+        'Quantity pending',
+      );
+    }
+    try {
+      await _enqueueLine(itemId, () async {
+        final desired = _desiredQty[itemId] ?? 0;
+        if (desired <= 0) {
+          _desiredQty.remove(itemId);
+          await _handleRemove(itemId, emit);
+          return;
+        }
+        await _flushQty(itemId, emit);
+      });
+    } catch (e) {
+      _emitLogged(
+        emit,
+        state.copyWith(
+          status: CartStatus.loaded,
+          errorMessage: e.toString(),
+          pendingLineIds: _pendingMinus(itemId),
+        ),
+        'UpdateQuantity error',
+      );
+    } finally {
+      _qtyFlushing.remove(itemId);
+      _inflightLines.remove(itemId);
+      _emitClearPending(emit, itemId, 'Quantity done');
+      opSw.stop();
+      _perf(
+        'UI COMPLETE duration=${opSw.elapsedMilliseconds}ms op=QUANTITY line=$itemId',
+      );
+    }
+  }
+
+  Future<void> _onClear(ClearCartEvent event, Emitter<CartState> emit) async {
+    await _enqueue(() async {
+      try {
+        _emitLogged(
+          emit,
+          state.copyWith(status: CartStatus.updating),
+          'ClearCart',
+        );
+        for (final item in List<CartItem>.from(state.items)) {
+          await _repository.upsert(
+            request: CartWriteRequest(
+              productId: item.productId,
+              variantId: item.variantId,
+              quantity: 0,
+              itemType: item.itemType,
+              productClass: item.productClass ?? 'single_item',
+            ),
+            requestId: _repository.nextRequestId(),
+            source: 'ClearCart',
+          );
+        }
+        await _getAuthoritative(emit, source: 'ClearCart.afterPost');
+      } catch (_) {
+        try {
+          await _getAuthoritative(emit, source: 'ClearCart.error');
+        } catch (e, st) {
+          _completeRefreshWaiters(state.remote, e, st);
+        }
+      }
+    });
+  }
+
+  Future<void> _onClearLocal(
+    ClearLocalCartEvent event,
+    Emitter<CartState> emit,
+  ) async {
+    _desiredQty.clear();
+    _inflightLines.clear();
+    _qtyFlushing.clear();
+    _lineOps.clear();
+    _latestApplyId = _repository.nextRequestId();
+    _emitLogged(
+      emit,
+      const CartState(status: CartStatus.loaded),
+      'ClearLocalCart',
+    );
+  }
+
+  Future<void> _onClearPaid(
+    ClearPaidRentalItemsEvent event,
+    Emitter<CartState> emit,
+  ) async {
+    await _enqueue(() async {
+      final paid = List<CartItem>.from(state.paidRentalGarmentItems);
+      if (paid.isEmpty) return;
+      try {
+        for (final item in paid) {
+          await _repository.upsert(
+            request: CartWriteRequest(
+              productId: item.productId,
+              variantId: item.variantId,
+              quantity: 0,
+              itemType: item.itemType,
+              productClass: item.productClass ?? 'single_item',
+            ),
+            requestId: _repository.nextRequestId(),
+            source: 'ClearPaidRental',
+          );
+        }
+        await _getAuthoritative(emit, source: 'ClearPaidRental.afterPost');
+      } catch (e) {
+        _emitLogged(
+          emit,
+          state.copyWith(status: CartStatus.loaded, errorMessage: e.toString()),
+          'ClearPaidRental error',
+        );
+      }
+    });
+  }
+}
+
+int calculateCurrentSubscriptionGarmentCount(List<CartItem> items) {
+  return items.fold<int>(
+    0,
+    (sum, item) =>
+        item.itemType == 'subscription' ? sum + item.quantity : sum,
+  );
 }

@@ -157,52 +157,6 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
       }
     }
 
-    WardrobeItem? match;
-    if (item.category != null) {
-      final categoryItems = WardrobeCatalogue.items[item.category];
-      if (categoryItems != null) {
-        for (final wardrobeItem in categoryItems) {
-          if (wardrobeItem.title == item.productName) {
-            match = wardrobeItem;
-            break;
-          }
-        }
-      }
-    }
-
-    if (match == null) {
-      for (final entry in WardrobeCatalogue.items.entries) {
-        for (final wardrobeItem in entry.value) {
-          if (wardrobeItem.title == item.productName) {
-            match = wardrobeItem;
-            break;
-          }
-        }
-        if (match != null) break;
-      }
-    }
-
-    if (match != null) {
-      return WardrobeItem(
-        productId: match.productId ?? productId,
-        title: match.title,
-        description: match.description,
-        imageUrl: _isNetworkImage(item.imageAsset)
-            ? item.imageAsset
-            : match.imageUrl,
-        price: match.price,
-        imageUrls: match.imageUrls,
-        colorVariantImages: match.colorVariantImages,
-        colorNames: match.colorNames,
-        sizes: match.sizes,
-        ages: match.ages,
-        productDetails: match.productDetails,
-        variants: match.variants,
-        category: item.category ?? match.category,
-        genderTag: match.genderTag,
-      );
-    }
-
     return WardrobeItem(
       productId: isApiUuid(productId) ? productId : null,
       title: item.productName,
@@ -554,21 +508,9 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
           ),
           if (_expanded && order.hasLineItems) ...[
             SizedBox(height: 24.h),
-            ...order.lineItems!.map(
-              (item) => Padding(
-                padding: EdgeInsets.only(bottom: 16.h),
-                child: _LineItemRow(
-                  item: item,
-                  showReviewRating: order.isDelivered,
-                  alreadyRated: _ratedProductIds.contains(item.productId.trim()),
-                  ratingValue: _ratedProductValues[item.productId.trim()],
-                  onRateTap: _ratedProductIds.contains(item.productId.trim())
-                      ? null
-                      : () => _onRateTap(item),
-                  onProductTap: () => _openProductDetails(item),
-                ),
-              ),
-            ),
+            ..._buildGroupedSections(order),
+            SizedBox(height: 20.h),
+            _buildPaymentSummary(order),
           ],
           SizedBox(height: 20.h),
           Container(height: 1, color: Colors.white24),
@@ -604,6 +546,198 @@ class _OrderDetailsScreenState extends State<OrderDetailsScreen> {
           Container(
             height: 1,
             color: AppColours.primary.withOpacity(0.35),
+          ),
+        ],
+      ),
+    );
+  }
+
+  List<Widget> _buildGroupedSections(UserOrder order) {
+    final items = order.lineItems ?? [];
+    final subscriptionItems = items
+        .where((i) => i.itemType == 'subscription')
+        .toList();
+    final nonSubscriptionItems = items
+        .where((i) => i.itemType == 'non_subscription')
+        .toList();
+    final kidsEssentialItems = items
+        .where((i) => i.itemType == 'kids' || i.itemType == 'essentials')
+        .toList();
+
+    final widgets = <Widget>[];
+
+    if (subscriptionItems.isNotEmpty) {
+      widgets.addAll(_buildGarmentSection(
+        title: 'Subscription Kit',
+        items: subscriptionItems,
+        order: order,
+      ));
+    }
+
+    if (nonSubscriptionItems.isNotEmpty) {
+      widgets.addAll(_buildGarmentSection(
+        title: 'Non-Subscription Kit',
+        items: nonSubscriptionItems,
+        order: order,
+      ));
+    }
+
+    if (kidsEssentialItems.isNotEmpty) {
+      widgets.addAll(_buildGarmentSection(
+        title: 'Kids & Essentials',
+        items: kidsEssentialItems,
+        order: order,
+      ));
+    }
+
+    // Fallback: items with no recognized itemType
+    final otherItems = items
+        .where((i) =>
+            i.itemType != 'subscription' &&
+            i.itemType != 'non_subscription' &&
+            i.itemType != 'kids' &&
+            i.itemType != 'essentials')
+        .toList();
+    if (otherItems.isNotEmpty &&
+        subscriptionItems.isEmpty &&
+        nonSubscriptionItems.isEmpty &&
+        kidsEssentialItems.isEmpty) {
+      widgets.addAll(_buildGarmentSection(
+        title: 'Order Items',
+        items: otherItems,
+        order: order,
+      ));
+    }
+
+    return widgets;
+  }
+
+  List<Widget> _buildGarmentSection({
+    required String title,
+    required List<OrderLineItem> items,
+    required UserOrder order,
+  }) {
+    return [
+      Container(
+        padding: EdgeInsets.symmetric(horizontal: 12.w, vertical: 8.h),
+        decoration: BoxDecoration(
+          color: const Color(0xFF0E0E1A),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(
+            color: AppColours.primary.withOpacity(0.25),
+          ),
+        ),
+        child: Text(
+          title,
+          style: TextStyle(
+            color: AppColours.primary,
+            fontSize: 14.fSize,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.5,
+          ),
+        ),
+      ),
+      SizedBox(height: 12.h),
+      ...items.map(
+        (item) => Padding(
+          padding: EdgeInsets.only(bottom: 16.h),
+          child: _LineItemRow(
+            item: item,
+            showReviewRating: order.isDelivered,
+            alreadyRated: _ratedProductIds.contains(item.productId.trim()),
+            ratingValue: _ratedProductValues[item.productId.trim()],
+            onRateTap: _ratedProductIds.contains(item.productId.trim())
+                ? null
+                : () => _onRateTap(item),
+            onProductTap: () => _openProductDetails(item),
+          ),
+        ),
+      ),
+    ];
+  }
+
+  Widget _buildPaymentSummary(UserOrder order) {
+    final items = order.lineItems ?? [];
+
+    final subscriptionTotal = items
+        .where((i) => i.itemType == 'subscription')
+        .fold<num>(0, (sum, i) => sum + i.lineTotal);
+    final nonSubscriptionTotal = items
+        .where((i) => i.itemType == 'non_subscription')
+        .fold<num>(0, (sum, i) => sum + i.lineTotal);
+    final kidsEssentialTotal = items
+        .where((i) => i.itemType == 'kids' || i.itemType == 'essentials')
+        .fold<num>(0, (sum, i) => sum + i.lineTotal);
+
+    final hasSubscription = items.any((i) => i.itemType == 'subscription');
+    final hasNonSubscription = items.any((i) => i.itemType == 'non_subscription');
+    final hasKidsEssential =
+        items.any((i) => i.itemType == 'kids' || i.itemType == 'essentials');
+
+    return Container(
+      padding: EdgeInsets.all(16.w),
+      decoration: BoxDecoration(
+        color: const Color(0xFF080812),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: AppColours.primary.withOpacity(0.30),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Payment Summary',
+            style: TextStyle(
+              color: AppColours.primary,
+              fontSize: 15.fSize,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          SizedBox(height: 14.h),
+          if (hasNonSubscription)
+            _paymentRow('Non-Subscription Kit', nonSubscriptionTotal),
+          if (hasKidsEssential)
+            _paymentRow('Kids & Essentials', kidsEssentialTotal),
+          Padding(
+            padding: EdgeInsets.symmetric(vertical: 10.h),
+            child: Container(
+              height: 1,
+              color: AppColours.primary.withOpacity(0.25),
+            ),
+          ),
+          _paymentRow(
+            'Total Amount',
+            order.totalAmount,
+            isBold: true,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _paymentRow(String label, num amount, {bool isBold = false}) {
+    final formatted = '₹ ${amount.toStringAsFixed(amount.truncateToDouble() == amount ? 0 : 2)}';
+    return Padding(
+      padding: EdgeInsets.symmetric(vertical: 4.h),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              color: isBold ? AppColours.primary : Colors.white70,
+              fontSize: isBold ? 14.fSize : 13.fSize,
+              fontWeight: isBold ? FontWeight.w700 : FontWeight.w500,
+            ),
+          ),
+          Text(
+            formatted,
+            style: TextStyle(
+              color: isBold ? AppColours.primary : Colors.white,
+              fontSize: isBold ? 15.fSize : 13.fSize,
+              fontWeight: isBold ? FontWeight.w700 : FontWeight.w600,
+            ),
           ),
         ],
       ),
@@ -928,6 +1062,31 @@ class _LineItemRow extends StatelessWidget {
                         'Size: ${item.sizeLabel}',
                         style: CustomTextStyles.montserratMedium.copyWith(fontSize: 12),
                       ),
+                      if (item.quantity > 1) ...[
+                        SizedBox(height: 3.h),
+                        Text(
+                          'Qty: ${item.quantity}',
+                          style: CustomTextStyles.montserratMedium.copyWith(fontSize: 12),
+                        ),
+                      ],
+                      if (item.itemType != 'subscription') ...[
+                        SizedBox(height: 3.h),
+                        Text(
+                          item.lineTotal > 0
+                              ? '₹ ${item.lineTotal.toStringAsFixed(item.lineTotal.truncateToDouble() == item.lineTotal ? 0 : 2)}'
+                              : 'Included in Subscription',
+                          style: TextStyle(
+                            color: item.lineTotal > 0
+                                ? Colors.white
+                                : AppColours.primary.withOpacity(0.7),
+                            fontSize: 12.fSize,
+                            fontWeight: FontWeight.w600,
+                            fontStyle: item.lineTotal > 0
+                                ? FontStyle.normal
+                                : FontStyle.italic,
+                          ),
+                        ),
+                      ],
                       SizedBox(height: 6.h),
                       if (showReviewRating && item.isDelivered)
                         Row(

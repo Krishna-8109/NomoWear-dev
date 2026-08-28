@@ -8,6 +8,10 @@ class OrderLineItem {
   final bool isDelivered;
   final String imageAsset;
   final String? category;
+  final String? itemType;
+  final int quantity;
+  final num unitPrice;
+  final num lineTotal;
 
   const OrderLineItem({
     required this.productId,
@@ -18,6 +22,10 @@ class OrderLineItem {
     required this.isDelivered,
     required this.imageAsset,
     this.category,
+    this.itemType,
+    this.quantity = 1,
+    this.unitPrice = 0,
+    this.lineTotal = 0,
   });
 }
 
@@ -43,6 +51,10 @@ class UserOrder {
   final String mobileDisplay;
   /// When [isDelivered] is true, order details summary uses Return if true, else Track.
   final bool deliveredSummaryShowsReturn;
+  final bool isWardrobeKit;
+  final int totalGarmentsCount;
+  final String? deliveryDateFormatted;
+  final num totalAmount;
 
   const UserOrder({
     required this.id,
@@ -61,6 +73,10 @@ class UserOrder {
     required this.addressLines,
     required this.mobileDisplay,
     this.deliveredSummaryShowsReturn = true,
+    this.isWardrobeKit = false,
+    this.totalGarmentsCount = 0,
+    this.deliveryDateFormatted,
+    this.totalAmount = 0,
   });
 
   bool get hasLineItems => lineItems != null && lineItems!.isNotEmpty;
@@ -90,6 +106,10 @@ class UserOrder {
     String? addressLines,
     String? mobileDisplay,
     bool? deliveredSummaryShowsReturn,
+    bool? isWardrobeKit,
+    int? totalGarmentsCount,
+    String? deliveryDateFormatted,
+    num? totalAmount,
   }) {
     return UserOrder(
       id: id ?? this.id,
@@ -109,6 +129,10 @@ class UserOrder {
       mobileDisplay: mobileDisplay ?? this.mobileDisplay,
       deliveredSummaryShowsReturn:
           deliveredSummaryShowsReturn ?? this.deliveredSummaryShowsReturn,
+      isWardrobeKit: isWardrobeKit ?? this.isWardrobeKit,
+      totalGarmentsCount: totalGarmentsCount ?? this.totalGarmentsCount,
+      deliveryDateFormatted: deliveryDateFormatted ?? this.deliveryDateFormatted,
+      totalAmount: totalAmount ?? this.totalAmount,
     );
   }
 }

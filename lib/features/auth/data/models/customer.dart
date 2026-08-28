@@ -107,6 +107,8 @@ class Customer {
   final String wallet;
   final int isVerified;
   final List<CustomerAddress> addresses;
+  final double? latitude;
+  final double? longitude;
 
   const Customer({
     required this.id,
@@ -123,6 +125,8 @@ class Customer {
     this.wallet = '0.00',
     required this.isVerified,
     this.addresses = const [],
+    this.latitude,
+    this.longitude,
   });
 
   CustomerAddress? get primaryAddress {
@@ -134,6 +138,11 @@ class Customer {
   }
 
   factory Customer.fromJson(Map<String, dynamic> json) {
+    double? parseDouble(dynamic value) {
+      if (value is num) return value.toDouble();
+      return double.tryParse(value?.toString() ?? '');
+    }
+
     final addresses = <CustomerAddress>[];
 
     final rawAddresses = json['addresses'];
@@ -191,6 +200,8 @@ class Customer {
           ? json['is_verified'] as int
           : int.tryParse(json['is_verified']?.toString() ?? '0') ?? 0,
       addresses: addresses,
+      latitude: parseDouble(json['latitude'] ?? json['lat']),
+      longitude: parseDouble(json['longitude'] ?? json['lng']),
     );
   }
 }

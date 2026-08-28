@@ -1,57 +1,47 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:nomowear/core/app_export.dart';
 import 'package:nomowear/features/home/presentation/bloc/home_bloc.dart';
 import 'package:nomowear/features/categories/presentation/screens/categories_screen.dart';
 import 'package:nomowear/features/home/presentation/screens/subscription_tab_widget.dart';
 import 'package:nomowear/features/subscriptions/presentation/bloc/subscription_bloc.dart';
+import 'package:nomowear/features/subscriptions/data/subscription_garment_balance.dart';
 import 'package:nomowear/core/network/api_exception.dart';
 import 'package:nomowear/core/services/auth_storage.dart';
 import 'package:nomowear/features/auth/data/models/customer.dart';
 import 'package:nomowear/features/banners/data/banner_cache.dart';
 import 'package:nomowear/features/banners/data/banner_repository.dart';
 import 'package:nomowear/features/banners/data/models/promo_banner.dart';
-import 'package:nomowear/features/products/data/models/product.dart';
-import 'package:nomowear/features/products/data/product_catalog.dart';
-import 'package:nomowear/features/products/data/product_cache.dart';
-import 'package:nomowear/features/products/data/product_repository.dart';
+import 'package:nomowear/features/categories/data/category_cache.dart';
+import 'package:nomowear/features/categories/data/category_repository.dart';
+import 'package:nomowear/features/categories/data/models/wardrobe_category.dart';
 import 'package:nomowear/features/profile/data/profile_cache.dart';
 import 'package:nomowear/features/profile/data/profile_repository.dart';
 import 'package:nomowear/features/profile/presentation/screens/profile_screen.dart';
 import 'package:nomowear/features/notifications/presentation/screens/notifications_screen.dart';
 import 'package:nomowear/features/cart/presentation/screens/cart_screen.dart';
+import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
 import 'package:nomowear/features/checkout/presentation/utils/wardrobe_booking_flow.dart';
 import 'custom_bottom_nav.dart';
 
 class HomeScreen extends StatefulWidget {
   final int initialTabIndex;
+  final bool refreshHomeOnEnter;
+  final String refreshSource;
 
-  const HomeScreen({Key? key, this.initialTabIndex = 0}) : super(key: key);
+  const HomeScreen({
+    Key? key,
+    this.initialTabIndex = 0,
+    this.refreshHomeOnEnter = false,
+    this.refreshSource = 'navigation',
+  }) : super(key: key);
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  static const List<Map<String, String>> _fallbackBannerSlides = [
-    {
-      'title': 'Welcome to NOMOWEAR',
-      'subtitle': 'Discover the Curated Wardrobe for Your\nEvery Journey',
-      'image': ImageConstant.homeScreenImg6,
-    },
-    {
-      'title': 'Premium Looks, On Demand',
-      'subtitle': 'Curated outfits for work, events,\nand special days',
-      'image': ImageConstant.homeScreenImg2,
-    },
-    {
-      'title': 'Style Made Effortless',
-      'subtitle':
-          'Choose, rent, and wear with confidence\nfor every occasion',
-      'image': ImageConstant.homeScreenImg4,
-    },
-  ];
-
   int _currentSlide = 0;
   final PageController _pageController = PageController(viewportFraction: 1.0);
   Timer? _timer;
@@ -60,7 +50,7 @@ class _HomeScreenState extends State<HomeScreen> {
   late SubscriptionBloc _subscriptionBloc;
 
   final ProfileRepository _profileRepository = ProfileRepository();
-  final ProductRepository _productRepository = ProductRepository();
+  final CategoryRepository _categoryRepository = CategoryRepository();
   final BannerRepository _bannerRepository = BannerRepository();
   final AuthStorage _authStorage = AuthStorage();
   Customer? _profile;
@@ -69,15 +59,15 @@ class _HomeScreenState extends State<HomeScreen> {
   List<PromoBanner> _banners = [];
   bool _isLoadingBanners = true;
 
-  List<Product> _wardrobeProducts = [];
-  Product? _essentialsProduct;
-  bool _isLoadingProducts = true;
+  List<WardrobeCategory> _wardrobeCategories = [];
+  WardrobeCategory? _essentialsCategory;
+  bool _isLoadingCategories = true;
 
   /// Guards against overlapping pull-to-refresh / concurrent refreshes.
   bool _isRefreshingHome = false;
+  bool _didPostPaymentRefresh = false;
 
-  int get _bannerSlideCount =>
-      _banners.isNotEmpty ? _banners.length : _fallbackBannerSlides.length;
+  int get _bannerSlideCount => _banners.length;
 
   Widget _buildSubscriptionContent(int tabIndex) {
     return const SubscriptionTabWidget();
@@ -88,9 +78,95 @@ class _HomeScreenState extends State<HomeScreen> {
     _homeBloc = HomeBloc(initialBottomNavIndex: widget.initialTabIndex);
     _subscriptionBloc = SubscriptionBloc()
       ..add(LoadActiveSubscriptionEvent());
-    _loadProfile();
-    _loadProducts();
-    _loadBanners();
+    if (widget.refreshHomeOnEnter) {
+      _isLoadingProfile = true;
+      _isLoadingCategories = true;
+      _isLoadingBanners = true;
+    } else {
+      _loadProfile();
+      _loadCategories();
+      _loadBanners();
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (widget.refreshHomeOnEnter) {
+        _refreshAfterPaymentSuccess();
+        return;
+      }
+      context.read<CartBloc>().add(
+        LoadCartEvent(
+          forceRefresh: true,
+          source: 'HomeScreen.initState',
+        ),
+      );
+    });
+  }
+
+  Future<void> _refreshAfterPaymentSuccess() async {
+    if (_didPostPaymentRefresh || _isRefreshingHome) return;
+    _didPostPaymentRefresh = true;
+    _isRefreshingHome = true;
+    if (kDebugMode) {
+      debugPrint('[HOME_REFRESH] START source=${widget.refreshSource}');
+    }
+    try {
+      final errors = <Object>[];
+      await Future.wait([
+        _runHomeRefreshTask(
+          () => _loadProfile(forceRefresh: true, propagateError: true),
+          errors,
+        ),
+        _runHomeRefreshTask(
+          () => _loadCategories(forceRefresh: true, propagateError: true),
+          errors,
+        ),
+        _runHomeRefreshTask(
+          () => _loadBanners(forceRefresh: true, propagateError: true),
+          errors,
+        ),
+      ]);
+
+      if (!mounted) return;
+      // Cart was already refreshed in the payment-success handler before
+      // navigation; skip the redundant GET unless the state is stale.
+      final cartBloc = context.read<CartBloc>();
+      if (cartBloc.state.status == CartStatus.initial) {
+        final remoteCart = await cartBloc.refresh(
+          source: 'HomeScreen.${widget.refreshSource}',
+        );
+        if (kDebugMode) {
+          debugPrint('[CART_AFTER_PAYMENT] item_count=${remoteCart.itemCount}');
+        }
+      } else if (kDebugMode) {
+        debugPrint(
+          '[HOME_REFRESH] cart already refreshed, '
+          'items=${cartBloc.state.totalItems}',
+        );
+      }
+      if (kDebugMode) {
+        debugPrint('[HOME_REFRESH] API_COMPLETE');
+      }
+
+      _subscriptionBloc.add(LoadActiveSubscriptionEvent());
+      await SubscriptionGarmentBalance.resolveAndCache(forceRefresh: true);
+
+      if (mounted && errors.isNotEmpty) {
+        ScaffoldMessenger.of(context)
+          ..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              content: Text(_homeRefreshErrorMessage(errors)),
+              backgroundColor: const Color(0xFF2A2D36),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+      }
+      if (kDebugMode) {
+        debugPrint('[HOME_REFRESH] STATE_UPDATED');
+      }
+    } finally {
+      _isRefreshingHome = false;
+    }
   }
 
   Future<void> _loadProfile({
@@ -132,46 +208,86 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _loadProducts({
+  Future<void> _loadCategories({
     bool forceRefresh = false,
     bool propagateError = false,
   }) async {
     if (!forceRefresh) {
-      final cached = ProductCache.instance.products;
+      final cached = CategoryCache.instance.categories;
       if (cached != null) {
-        _applyProducts(cached);
-        if (mounted) setState(() => _isLoadingProducts = false);
+        if (mounted) {
+          setState(() {
+            _applyCategories(cached);
+            _isLoadingCategories = false;
+          });
+        }
         return;
       }
     }
 
     final token = await _authStorage.getAuthToken();
     if (token == null || token.isEmpty) {
-      if (mounted) setState(() => _isLoadingProducts = false);
+      if (mounted) {
+        setState(() {
+          _applyCategories(const []);
+          _isLoadingCategories = false;
+        });
+      }
       return;
     }
 
     try {
-      final products = await _productRepository.getProducts(
+      final categories = await _categoryRepository.getCategories(
         forceRefresh: forceRefresh,
       );
       if (!mounted) return;
-      _applyProducts(products);
-      setState(() => _isLoadingProducts = false);
+      setState(() {
+        _applyCategories(categories);
+        _isLoadingCategories = false;
+      });
     } on ApiException {
       if (!mounted) return;
-      setState(() => _isLoadingProducts = false);
+      setState(() {
+        _applyCategories(const []);
+        _isLoadingCategories = false;
+      });
       if (propagateError) rethrow;
     } catch (_) {
       if (!mounted) return;
-      setState(() => _isLoadingProducts = false);
+      setState(() {
+        _applyCategories(const []);
+        _isLoadingCategories = false;
+      });
       if (propagateError) rethrow;
     }
   }
 
-  void _applyProducts(List<Product> products) {
-    _wardrobeProducts = ProductCatalog.homeWardrobeCards(products);
-    _essentialsProduct = ProductCatalog.essentialsWardrobeProduct(products);
+  void _applyCategories(List<WardrobeCategory> categories) {
+    WardrobeCategory? essentials;
+    final cards = <WardrobeCategory>[];
+    for (final category in categories) {
+      if (essentials == null && category.isEssentials) {
+        essentials = category;
+      } else {
+        cards.add(category);
+      }
+    }
+    cards.sort((a, b) {
+      final order = _wardrobeCardOrder(a).compareTo(_wardrobeCardOrder(b));
+      if (order != 0) return order;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    _wardrobeCategories = cards;
+    _essentialsCategory = essentials;
+  }
+
+  int _wardrobeCardOrder(WardrobeCategory category) {
+    final name = category.name.toLowerCase();
+    if (name.contains('comfort')) return 0;
+    if (name.contains('professional')) return 1;
+    if (name.contains('premium')) return 2;
+    if (name.contains('kids')) return 3;
+    return 100;
   }
 
   Future<void> _loadBanners({
@@ -230,8 +346,7 @@ class _HomeScreenState extends State<HomeScreen> {
     _isRefreshingHome = true;
 
     try {
-      // Profile header, wardrobe/essentials products, and promo banners.
-      // (Notifications count / categories APIs are not part of this Home tab.)
+      // Profile header, wardrobe categories, and promo banners.
       final errors = <Object>[];
       await Future.wait([
         _runHomeRefreshTask(
@@ -239,7 +354,7 @@ class _HomeScreenState extends State<HomeScreen> {
           errors,
         ),
         _runHomeRefreshTask(
-          () => _loadProducts(forceRefresh: true, propagateError: true),
+          () => _loadCategories(forceRefresh: true, propagateError: true),
           errors,
         ),
         _runHomeRefreshTask(
@@ -337,6 +452,9 @@ class _HomeScreenState extends State<HomeScreen> {
           listener: (_, state) {
             // Reuse loaded data when switching tabs; no forced API reload here.
             // Subscription tab itself handles subscription reload on first entry.
+            if (state.bottomNavIndex == 0) {
+              _loadProfile();
+            }
           },
           child: BlocBuilder<HomeBloc, HomeState>(
             builder: (context, state) {
@@ -364,7 +482,10 @@ class _HomeScreenState extends State<HomeScreen> {
       children: [
         _buildHomeContent(),
         const CategoriesScreen(isTab: true),
-        const CartScreen(),
+        CartScreen(
+          key: const ValueKey('home_cart_tab'),
+          isActive: index == 2,
+        ),
         _buildSubscriptionContent(index),
         const ProfileScreen(isTab: true),
       ],
@@ -474,52 +595,64 @@ class _HomeScreenState extends State<HomeScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Row(
-          children: [
-            Container(
-              height: 48.h,
-              width: 48.w,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                border: Border.all(color: AppColours.primary, width: 1.5),
+        Expanded(
+          child: Row(
+            children: [
+              Container(
+                height: 48.h,
+                width: 48.w,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: AppColours.primary, width: 1.5),
+                ),
+                child: ClipOval(
+                  child: photoUrl != null && photoUrl.startsWith('http')
+                      ? (() {
+                          print('HOME PROFILE IMAGE =\n$photoUrl');
+                          return Image.network(
+                            photoUrl,
+                            fit: BoxFit.cover,
+                            width: 48.w,
+                            height: 48.h,
+                            errorBuilder: (_, __, ___) => Image.asset(
+                              ImageConstant.homeScreenImg2,
+                              fit: BoxFit.cover,
+                            ),
+                          );
+                        })()
+                      : (() {
+                          print('HOME PROFILE IMAGE URL = null (using asset)');
+                          return Image.asset(
+                            ImageConstant.homeScreenImg2,
+                            fit: BoxFit.cover,
+                          );
+                        })(),
+                ),
               ),
-              child: ClipOval(
-                child: photoUrl != null && photoUrl.startsWith('http')
-                    ? Image.network(
-                        photoUrl,
-                        fit: BoxFit.cover,
-                        width: 48.w,
-                        height: 48.h,
-                        errorBuilder: (_, __, ___) => Image.asset(
-                          ImageConstant.homeScreenImg2,
-                          fit: BoxFit.cover,
-                        ),
-                      )
-                    : Image.asset(
-                        ImageConstant.homeScreenImg2,
-                        fit: BoxFit.cover,
+              SizedBox(width: 12.w),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "WELCOME",
+                      style: CustomTextStyles.openSansRegular.copyWith(
+                        fontSize: 12,
+                        color: AppColours.primary,
+                        letterSpacing: 2,
                       ),
+                    ),
+                    Text(
+                      displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: CustomTextStyles.montserratBold.copyWith(fontSize: 14),
+                    ),
+                  ],
+                ),
               ),
-            ),
-            SizedBox(width: 12.w),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  "WELCOME",
-                  style: CustomTextStyles.openSansRegular.copyWith(
-                    fontSize: 12,
-                    color: AppColours.primary,
-                    letterSpacing: 2,
-                  ),
-                ),
-                Text(
-                  displayName,
-                  style: CustomTextStyles.montserratBold.copyWith(fontSize: 14),
-                ),
-              ],
-            ),
-          ],
+            ],
+          ),
         ),
         Row(
           children: [
@@ -559,7 +692,10 @@ class _HomeScreenState extends State<HomeScreen> {
       return const BannerShimmer();
     }
 
-    final useApiBanners = _banners.isNotEmpty;
+    if (_banners.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
     final slideCount = _bannerSlideCount;
 
     return SizedBox(
@@ -574,26 +710,14 @@ class _HomeScreenState extends State<HomeScreen> {
         },
         itemCount: slideCount,
         itemBuilder: (context, index) {
-          if (useApiBanners) {
-            final banner = _banners[index];
-            return _buildBannerSlide(
-              title: banner.title,
-              subtitle: banner.description ?? '',
-              imageUrl: banner.imageUrl,
-              index: index,
-              totalSlides: slideCount,
-              isNetworkImage: true,
-            );
-          }
-
-          final slide = _fallbackBannerSlides[index];
+          final banner = _banners[index];
           return _buildBannerSlide(
-            title: slide['title']!,
-            subtitle: slide['subtitle']!,
-            imageUrl: slide['image']!,
+            title: banner.title,
+            subtitle: banner.description ?? '',
+            imageUrl: banner.imageUrl,
             index: index,
             totalSlides: slideCount,
-            isNetworkImage: false,
+            isNetworkImage: true,
           );
         },
       ),
@@ -624,9 +748,8 @@ class _HomeScreenState extends State<HomeScreen> {
               Image.network(
                 imageUrl,
                 fit: BoxFit.cover,
-                errorBuilder: (_, __, ___) => Image.asset(
-                  ImageConstant.homeScreenImg6,
-                  fit: BoxFit.cover,
+                errorBuilder: (_, __, ___) => const ColoredBox(
+                  color: Color(0xFF1A1D21),
                 ),
               )
             else
@@ -705,11 +828,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildWardrobeGrid() {
-    if (_isLoadingProducts) {
+    if (_isLoadingCategories) {
       return const WardrobeGridShimmer();
     }
 
-    if (_wardrobeProducts.isEmpty) {
+    if (_wardrobeCategories.isEmpty) {
       return Padding(
         padding: EdgeInsets.symmetric(vertical: 24.h),
         child: Text(
@@ -724,15 +847,15 @@ class _HomeScreenState extends State<HomeScreen> {
     }
 
     final rows = <Widget>[];
-    for (var i = 0; i < _wardrobeProducts.length; i += 2) {
+    for (var i = 0; i < _wardrobeCategories.length; i += 2) {
       if (i > 0) rows.add(SizedBox(height: 24.h));
       rows.add(
         Row(
           children: [
-            Expanded(child: _buildWardrobeCard(_wardrobeProducts[i])),
-            if (i + 1 < _wardrobeProducts.length) ...[
+            Expanded(child: _buildWardrobeCard(_wardrobeCategories[i])),
+            if (i + 1 < _wardrobeCategories.length) ...[
               SizedBox(width: 20.w),
-              Expanded(child: _buildWardrobeCard(_wardrobeProducts[i + 1])),
+              Expanded(child: _buildWardrobeCard(_wardrobeCategories[i + 1])),
             ] else
               Expanded(child: SizedBox(height: 180.h)),
           ],
@@ -743,53 +866,17 @@ class _HomeScreenState extends State<HomeScreen> {
     return Column(children: rows);
   }
 
-  bool _isKidsWardrobe(Product product) {
-    if (ProductCatalog.isKidsProduct(product)) return true;
-    final name = product.productName.toLowerCase();
-    final category = (product.categoryName ?? '').toLowerCase();
-    return name.contains('kids') || category.contains('kids');
+  String _wardrobeButtonLabel(WardrobeCategory category) {
+    return category.isKids ? 'BUY' : 'CHOOSE';
   }
 
-  String _wardrobeButtonLabel(Product product) {
-    return _isKidsWardrobe(product) ? 'BUY' : 'CHOOSE';
-  }
-
-  String _wardrobeCardTitle(Product product) {
-    if (ProductCatalog.isKidsProduct(product)) return 'Kids Wardrobe';
-    for (final key in ProductCatalog.homeWardrobeKeys) {
-      if (product.productName == key) return key;
-      if (product.categoryName == key) return key;
-    }
-    return product.productName;
-  }
-
-  String _wardrobeCardSubtitle(Product product) {
-    final title = _wardrobeCardTitle(product);
-    switch (title) {
-      case 'Comfort Wardrobe':
-        return 'Daily comfort · Travel · Lounge';
-      case 'Professional Wardrobe':
-        return 'Luxury · Occasion · Signature';
-      case 'Premium Wardrobe':
-        return 'Luxury · Parties · Special';
-      case 'Kids Wardrobe':
-        return 'Daily comfort · Travel · Lounge';
-      default:
-        return product.categoryName ?? '';
-    }
-  }
-
-  Widget _buildWardrobeCard(Product product) {
-    final title = _wardrobeCardTitle(product);
-    final subtitle = _wardrobeCardSubtitle(product);
-    final imageUrl = _isKidsWardrobe(product)
-        ? (product.primaryImageUrl ?? ImageConstant.kidsWearImg1)
-        : (product.primaryImageUrl ?? ImageConstant.homeScreenImg2);
-    final buttonLabel = _wardrobeButtonLabel(product);
+  Widget _buildWardrobeCard(WardrobeCategory category) {
+    final title = category.name;
+    final subtitle = category.featuresSubtitle;
+    final buttonLabel = _wardrobeButtonLabel(category);
 
     return GestureDetector(
-      onTap: () => _openWardrobe(product),
-
+      onTap: () => _openWardrobe(category),
       child: Container(
         height: 180.h,
         decoration: BoxDecoration(
@@ -813,17 +900,12 @@ class _HomeScreenState extends State<HomeScreen> {
           child: Stack(
             fit: StackFit.expand,
             children: [
-              imageUrl.startsWith('http')
-                  ? Image.network(
-                      imageUrl,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => const SizedBox(),
-                    )
-                  : Image.asset(
-                      imageUrl,
-                      fit: BoxFit.cover,
-                      errorBuilder: (_, __, ___) => const SizedBox(),
-                    ),
+              ProductImage(
+                imageUrl: category.imageUrl,
+                fit: BoxFit.cover,
+                width: double.infinity,
+                height: double.infinity,
+              ),
               Container(
                 decoration: const BoxDecoration(
                   gradient: LinearGradient(
@@ -841,25 +923,28 @@ class _HomeScreenState extends State<HomeScreen> {
                   children: [
                     Text(
                       title,
+                      textAlign: TextAlign.center,
                       style: CustomTextStyles.montserratBold.copyWith(
                         fontSize: 11,
                       ),
                     ),
-                    SizedBox(height: 4.h),
-                    Text(
-                      subtitle,
-                      textAlign: TextAlign.center,
-                      style: CustomTextStyles.openSansRegular.copyWith(
-                        fontSize: 8,
-                        color: AppColours.primary,
+                    if (subtitle != null) ...[
+                      SizedBox(height: 4.h),
+                      Text(
+                        subtitle,
+                        textAlign: TextAlign.center,
+                        style: CustomTextStyles.openSansRegular.copyWith(
+                          fontSize: 8,
+                          color: AppColours.primary,
+                        ),
                       ),
-                    ),
+                    ],
                     SizedBox(height: 12.h),
                     SizedBox(
                       height: 28.h,
                       width: 80.w,
                       child: ElevatedButton(
-                        onPressed: () => _openWardrobe(product),
+                        onPressed: () => _openWardrobe(category),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppColours.primary,
                           padding: EdgeInsets.zero,
@@ -886,31 +971,32 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  void _openWardrobe(Product product) {
-    final categoryName = _wardrobeCardTitle(product);
-    WardrobeBookingFlow.handleHomeProductChoose(
+  void _openWardrobe(WardrobeCategory category) {
+    WardrobeBookingFlow.handleHomeCategoryChoose(
       context,
-      product: product,
-      wardrobeCategory: categoryName,
-      isKidsCard: _isKidsWardrobe(product),
+      wardrobeCategory: category.name,
+      wardrobeCategoryId: category.id,
+      isKidsCard: category.isKids,
+      isEssentialsCard: category.isEssentials,
     );
   }
 
-  void _openEssentialsWardrobe() {
-    WardrobeBookingFlow.openEssentialsFlow(context);
-  }
-
   Widget _buildEssentialsBanner() {
-    if (_isLoadingProducts) {
+    if (_isLoadingCategories) {
       return const EssentialsBannerShimmer();
     }
 
-    final essentials = _essentialsProduct;
-    final title = essentials?.productName ?? 'Essentials Wardrobe';
-    final imageUrl = essentials?.primaryImageUrl;
+    final essentials = _essentialsCategory;
+    if (essentials == null) {
+      return const SizedBox.shrink();
+    }
+
+    final title = essentials.name;
+    final imageUrl = essentials.imageUrl;
+    final subtitle = essentials.featuresSubtitle;
 
     return GestureDetector(
-      onTap: _openEssentialsWardrobe,
+      onTap: () => _openWardrobe(essentials),
       child: Container(
         width: double.maxFinite,
         height: 180.h,
@@ -924,31 +1010,19 @@ class _HomeScreenState extends State<HomeScreen> {
               spreadRadius: 1,
             ),
           ],
-          image: imageUrl == null
-              ? DecorationImage(
-                  image: AssetImage(ImageConstant.homeScreenImg6),
-                  fit: BoxFit.cover,
-                )
-              : null,
         ),
-
         child: ClipRRect(
           borderRadius: BorderRadius.circular(20),
           child: Stack(
             children: [
-              if (imageUrl != null)
-                Positioned.fill(
-                  child: Image.network(
-                    imageUrl,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) => Image.asset(
-                      ImageConstant.homeScreenImg6,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
+              Positioned.fill(
+                child: ProductImage(
+                  imageUrl: imageUrl,
+                  fit: BoxFit.cover,
+                  width: double.infinity,
+                  height: double.infinity,
                 ),
-
-              /// 🔥 Bottom gradient (correct)
+              ),
               Container(
                 decoration: BoxDecoration(
                   gradient: LinearGradient(
@@ -962,8 +1036,6 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
               ),
-
-              /// 🔥 Content aligned to bottom
               Positioned(
                 left: 16.w,
                 right: 16.w,
@@ -971,8 +1043,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
-
-                    /// Text
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -986,24 +1056,23 @@ class _HomeScreenState extends State<HomeScreen> {
                               fontWeight: FontWeight.bold,
                             ),
                           ),
-                          SizedBox(height: 4.h),
-                          Text(
-                            essentials?.categoryName ??
-                                'Comfort • Daily wear • Must haves',
-                            style: CustomTextStyles.openSansRegular.copyWith(
-                              fontSize: 8,
-                              color: AppColours.primary,
+                          if (subtitle != null) ...[
+                            SizedBox(height: 4.h),
+                            Text(
+                              subtitle,
+                              style: CustomTextStyles.openSansRegular.copyWith(
+                                fontSize: 8,
+                                color: AppColours.primary,
+                              ),
                             ),
-                          ),
+                          ],
                         ],
                       ),
                     ),
-
-                    /// Button
                     SizedBox(
                       height: 30.h,
                       child: ElevatedButton(
-                        onPressed: _openEssentialsWardrobe,
+                        onPressed: () => _openWardrobe(essentials),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: AppColours.primary,
                           padding: EdgeInsets.symmetric(horizontal: 40.w),
@@ -1030,6 +1099,5 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
-
 }
 

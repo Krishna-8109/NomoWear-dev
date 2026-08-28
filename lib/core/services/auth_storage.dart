@@ -8,6 +8,7 @@ class AuthStorage {
   static const _authTokenKey = 'auth_token';
   static const _mobileKey = 'auth_mobile';
   static const _profileCompleteKey = 'profile_complete';
+  static const _profileDataKey = 'auth_profile_data';
 
   Future<void> savePendingOtpSession({
     required String customerId,
@@ -33,7 +34,6 @@ class AuthStorage {
     if (profileComplete) {
       await prefs.setBool(_profileCompleteKey, true);
     }
-
     if (kDebugMode) {
       debugPrint('════════ AUTH TOKEN SAVED ════════');
       debugPrint('Token: $authToken');
@@ -42,6 +42,16 @@ class AuthStorage {
       debugPrint('Profile complete: $profileComplete');
       debugPrint('══════════════════════════════════');
     }
+  }
+
+  Future<void> saveProfileData(String profileJson) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_profileDataKey, profileJson);
+  }
+
+  Future<String?> getProfileData() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_profileDataKey);
   }
 
   Future<bool> isLoggedIn() async {

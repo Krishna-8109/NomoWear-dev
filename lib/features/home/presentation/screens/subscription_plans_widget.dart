@@ -76,6 +76,10 @@ class _SubscriptionPlansWidgetState extends State<SubscriptionPlansWidget> {
   List<WardrobePlan> get _visiblePlans {
     if (_plans.isEmpty) return _plans;
     return _plans.where((plan) {
+      if (plan.billingPeriod.isNotEmpty) {
+        final isPlanYearly = plan.billingPeriod.toLowerCase().contains('year');
+        return isPlanYearly == _isYearlyTab;
+      }
       final price = _isYearlyTab ? plan.yearPrice : plan.monthPrice;
       return price > 0;
     }).toList();
@@ -265,16 +269,14 @@ class _SubscriptionPlansWidgetState extends State<SubscriptionPlansWidget> {
   }
 
   Widget _card(WardrobePlan plan) {
-    final priceValue = _isYearlyTab ? plan.yearPrice : plan.monthPrice;
+    final priceValue = plan.price > 0
+        ? plan.price
+        : (_isYearlyTab ? plan.yearPrice : plan.monthPrice);
     final price = PlanPriceFormatter.format(priceValue);
-    final features = plan.features.isNotEmpty
-        ? plan.features
-        : [
-            '${plan.durationDays} days',
-            '${plan.maxGarments} garments',
-            if (plan.description != null && plan.description!.isNotEmpty)
-              plan.description!,
-          ];
+    final periodStr = plan.billingPeriod.isNotEmpty
+        ? (plan.billingPeriod.toLowerCase().contains('year') ? '/year' : '/month')
+        : (_isYearlyTab ? "/year" : "/month");
+    final features = plan.features;
 
     final current = widget.currentSubscription;
     final isUpgradeMode = current != null;
@@ -302,7 +304,7 @@ class _SubscriptionPlansWidgetState extends State<SubscriptionPlansWidget> {
           ),
           SizedBox(height: 4.h),
           Text(
-            '₹ $price ${_isYearlyTab ? "/year" : "/month"}',
+            '₹ $price $periodStr',
             style: CustomTextStyles.openSansSemiBold.copyWith(
               color: AppColours.primary,
               fontSize: 14,
@@ -351,11 +353,34 @@ class _SubscriptionPlansWidgetState extends State<SubscriptionPlansWidget> {
           ),
           SizedBox(height: 8.h),
           if (isCurrentPlan)
-            Text(
-              'Current plan',
-              style: CustomTextStyles.openSansSemiBold.copyWith(
-                color: Colors.white54,
-                fontSize: 10,
+            Container(
+              padding: EdgeInsets.symmetric(horizontal: 10.w, vertical: 3.h),
+              decoration: BoxDecoration(
+                color: AppColours.primary.withOpacity(0.08),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: AppColours.primary.withOpacity(0.45),
+                  width: 1,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.check,
+                    color: AppColours.primary,
+                    size: 11.w,
+                  ),
+                  SizedBox(width: 4.w),
+                  Text(
+                    'Current plan',
+                    style: CustomTextStyles.openSansSemiBold.copyWith(
+                      color: AppColours.primary,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ),
             )
           else if (isUpgradeMode && !canUpgrade)
@@ -375,8 +400,12 @@ class _SubscriptionPlansWidgetState extends State<SubscriptionPlansWidget> {
                   final routeArgs = {
                     'title': plan.name,
                     'price': price,
-                    'period': _isYearlyTab ? 'year' : 'month',
-                    'billingPeriod': _isYearlyTab ? 'yearly' : 'monthly',
+                    'period': plan.billingPeriod.isNotEmpty
+                        ? (plan.billingPeriod.toLowerCase().contains('year') ? 'year' : 'month')
+                        : (_isYearlyTab ? 'year' : 'month'),
+                    'billingPeriod': plan.billingPeriod.isNotEmpty
+                        ? plan.billingPeriod
+                        : (_isYearlyTab ? 'yearly' : 'monthly'),
                     'features': features,
                     'planRef': plan.id,
                     'planId': plan.id,

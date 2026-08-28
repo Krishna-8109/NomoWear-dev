@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/foundation.dart';
 import 'package:nomowear/core/network/api_client.dart';
 import 'package:nomowear/core/network/api_constants.dart';
@@ -5,18 +7,59 @@ import 'package:nomowear/core/network/api_exception.dart';
 import 'package:nomowear/core/services/auth_storage.dart';
 import 'package:nomowear/core/utils/api_id_utils.dart';
 import 'package:nomowear/features/cart/data/models/remote_cart.dart';
-import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
 import 'package:nomowear/features/checkout/data/checkout_session.dart';
 import 'package:nomowear/features/profile/data/profile_cache.dart';
 import 'package:nomowear/features/profile/data/profile_repository.dart';
 
-// TODO(CART_DEBUG): Remove after verification.
-const bool _kCartDebugLogs = true;
+void _log(String message) {
+  if (kDebugMode) debugPrint('[CART_API] $message');
+}
 
-void _cartRepoDebug(String message) {
-  if (_kCartDebugLogs && kDebugMode) {
-    debugPrint('[CART_DEBUG] $message');
-  }
+class CartWriteResult {
+  const CartWriteResult({
+    required this.remote,
+    required this.isAuthoritative,
+    required this.durationMs,
+  });
+
+  final RemoteCart remote;
+  final bool isAuthoritative;
+  final int durationMs;
+}
+
+bool cartPayloadLooksAuthoritative(Map<String, dynamic> data) {
+  return data.containsKey('cartItems') ||
+      data.containsKey('cart_items') ||
+      data.containsKey('sections') ||
+      data.containsKey('summary') ||
+      data.containsKey('item_count') ||
+      data.containsKey('itemCount');
+}
+
+class CartWriteRequest {
+  const CartWriteRequest({
+    required this.productId,
+    required this.quantity,
+    required this.itemType,
+    this.variantId,
+    this.size,
+    this.categoryName,
+    this.kitDetails,
+    this.productClass,
+    this.productName,
+  });
+
+  final String productId;
+  final int quantity;
+  final String itemType;
+  final String? variantId;
+  final String? size;
+  final String? categoryName;
+  final Map<String, dynamic>? kitDetails;
+  final String? productClass;
+
+  /// Debug-only. Not sent in the POST body.
+  final String? productName;
 }
 
 class CartRepository {
@@ -32,221 +75,191 @@ class CartRepository {
   final AuthStorage _authStorage;
   final ProfileRepository _profileRepository;
 
-  Future<RemoteCart> getCart() async {
+  int _nextRequestId = 0;
+
+  int nextRequestId() => ++_nextRequestId;
+
+  Future<String> _token() async {
+    final sw = Stopwatch()..start();
+    if (kDebugMode) {
+      debugPrint(
+        '[CART_NETWORK] TOKEN_LOOKUP_START timestamp=${DateTime.now().toIso8601String()}',
+      );
+    }
     final authToken = await _authStorage.getAuthToken();
+    sw.stop();
+    if (kDebugMode) {
+      debugPrint(
+        '[CART_NETWORK] TOKEN_LOOKUP_END duration=${sw.elapsedMilliseconds}ms found=${authToken != null && authToken.isNotEmpty}',
+      );
+    }
     if (authToken == null || authToken.isEmpty) {
       throw const ApiException('Not logged in. Please login again.');
     }
+    return authToken;
+  }
+
+  Future<RemoteCart> getCart({
+    required int requestId,
+    required String source,
+  }) async {
+    _log(
+      'API GET START requestId=$requestId source=$source '
+      'ts=${DateTime.now().toIso8601String()}',
+    );
+    if (kDebugMode) debugPrint('[CART_PERF] GET START requestId=$requestId source=$source');
+    final sw = Stopwatch()..start();
 
     final json = await _apiClient.get(
       ApiConstants.cartPath,
-      authToken: authToken,
+      authToken: await _token(),
     );
-
-    if (json['success'] != true) {
-      throw ApiException(
-        json['message']?.toString() ?? 'Failed to load cart',
+    _printCartDebugGet(json: json, requestId: requestId, source: source);
+    sw.stop();
+    if (kDebugMode) {
+      debugPrint(
+        '[CART_PERF] GET END duration=${sw.elapsedMilliseconds}ms '
+        'requestId=$requestId source=$source',
       );
+    }
+    if (json['success'] != true) {
+      throw ApiException(json['message']?.toString() ?? 'Failed to load cart');
     }
 
     final data = json['data'];
     if (data is! Map<String, dynamic>) {
+      _log('API GET RESPONSE requestId=$requestId itemCount=0 (no data)');
       return const RemoteCart(id: '', items: []);
     }
 
     final remote = RemoteCart.fromJson(data);
-    _cartRepoDebug(
-      'Repo GET /cart parsed — count=${remote.items.length} '
-      'ids=[${remote.items.map((e) => '${e.productId}|${e.variantId ?? '-'}').join(', ')}]',
+    _log(
+      'API GET RESPONSE requestId=$requestId source=$source '
+      'cartId=${remote.id} updatedAt=${remote.updatedAt ?? '-'} '
+      'itemCount=${remote.itemCount} '
+      'subscription=${remote.subscriptionCount} '
+      'non_subscription=${remote.nonSubscriptionCount} '
+      'essentials=${remote.essentialsCount} '
+      'kids=${remote.kidsCount}',
     );
     return remote;
   }
 
-  Future<RemoteCart> upsertItem({
-    required CartItem item,
-    required CartState cartState,
-    int? quantity,
+  Future<CartWriteResult> upsert({
+    required CartWriteRequest request,
+    required int requestId,
+    required String source,
   }) async {
-    if (!isApiUuid(item.productId)) {
+    if (!isApiUuid(request.productId)) {
       throw const ApiException(
         'Invalid product in cart. Remove it and add items from the catalog again.',
       );
     }
 
-    final authToken = await _authStorage.getAuthToken();
-    if (authToken == null || authToken.isEmpty) {
-      throw const ApiException('Not logged in. Please login again.');
-    }
+    final variantId = (request.variantId != null &&
+            request.variantId!.trim().isNotEmpty &&
+            isApiUuid(request.variantId!))
+        ? request.variantId!.trim()
+        : null;
+
+    final kitDetails = (request.kitDetails != null && request.kitDetails!.isNotEmpty)
+        ? request.kitDetails
+        : null;
 
     final body = <String, dynamic>{
-      'productId': item.productId,
-      'quantity': quantity ?? item.quantity,
+      'productId': request.productId,
+      'quantity': request.quantity,
+      'variantId': variantId,
+      'kitDetails': kitDetails,
     };
 
-    final variantId = item.variantId?.trim();
-    if (variantId != null && variantId.isNotEmpty && isApiUuid(variantId)) {
-      body['variantId'] = variantId;
+    if (request.itemType.isNotEmpty) {
+      body['item_type'] = request.itemType;
     }
 
-    final size = item.selectedSize.trim();
-    if (size.isNotEmpty) {
-      body['size'] = size;
-    }
+    // Removed extra fields (size, categoryName, product_class) 
+    // to strictly match the exact backend POST /mobile/v1/cart schema.
 
-    final kitDetails = await _buildKitDetails(
-      item: item,
-      cartState: cartState,
+    final encoded = jsonEncode(body);
+    _log('API POST START requestId=$requestId source=$source');
+    _printSingleItemCartDebug(
+      request: request,
+      body: body,
+      encoded: encoded,
+      source: source,
+      requestId: requestId,
     );
-    if (kitDetails != null && kitDetails.isNotEmpty) {
-      body['kitDetails'] = kitDetails;
+    _printCartDebugPostRequest(
+      request: request,
+      body: body,
+      encoded: encoded,
+      source: source,
+      requestId: requestId,
+    );
+    if (kDebugMode) {
+      debugPrint(
+        '[CART_PERF] POST START requestId=$requestId source=$source '
+        'productId=${request.productId} qty=${request.quantity} '
+        'itemType=${request.itemType}',
+      );
+      debugPrint('[CART_NETWORK] POST_REQUEST_ID=$requestId source=$source');
     }
-
-    if (kitDetails != null) {
-      final kitProductId = cartState.wardrobeKitProductId?.trim();
-      body['product_class'] = kitProductId != null && item.productId == kitProductId
-          ? 'wardrobe_kit'
-          : 'single_item';
-    } else if (item.isEssential) {
-      body['product_class'] = 'single_item';
-    }
+    final sw = Stopwatch()..start();
 
     final json = await _apiClient.post(
       ApiConstants.cartPath,
       body,
-      authToken: authToken,
+      authToken: await _token(),
     );
-
+    sw.stop();
+    _printCartDebugPostResponse(json: json, requestId: requestId, source: source);
+    if (kDebugMode) {
+      debugPrint(
+        '[CART_PERF] POST END duration=${sw.elapsedMilliseconds}ms '
+        'requestId=$requestId source=$source',
+      );
+    }
     if (json['success'] != true) {
       throw ApiException(
         json['message']?.toString() ?? 'Failed to update cart',
       );
     }
-
     final data = json['data'];
-    if (data is! Map<String, dynamic>) {
-      throw const ApiException('Invalid cart response');
-    }
-
-    final remote = RemoteCart.fromJson(data);
-    _cartRepoDebug(
-      'Repo POST /cart parsed — count=${remote.items.length} '
-      'ids=[${remote.items.map((e) => '${e.productId}|${e.variantId ?? '-'}').join(', ')}] '
-      'upserted=${item.productId}',
-    );
-    return remote;
-  }
-
-  Future<RemoteCart> removeItem({
-    required CartItem item,
-    required CartState cartState,
-  }) {
-    return upsertItem(item: item, cartState: cartState, quantity: 0);
-  }
-
-  /// Clears all items from the server cart after a successful order.
-  Future<void> clearRemoteCart(CartState cartState) async {
-    final remote = await getCart();
-    if (remote.items.isEmpty) return;
-
-    for (final remoteItem in remote.items) {
-      final item = CartItem(
-        id: remoteItem.variantId != null && remoteItem.variantId!.isNotEmpty
-            ? '${remoteItem.productId}_${remoteItem.variantId}'
-            : remoteItem.productId,
-        productId: remoteItem.productId,
-        variantId: remoteItem.variantId,
-        title: remoteItem.productName,
-        imageUrl: '',
-      );
-      await upsertItem(item: item, cartState: cartState, quantity: 0);
-    }
-  }
-
-  Future<RemoteCart> syncCartState(CartState cartState) async {
-    RemoteCart? latest;
-    for (final item in cartState.items) {
-      latest = await upsertItem(item: item, cartState: cartState);
-    }
-    return latest ?? await getCart();
-  }
-
-  Future<RemoteCart> ensureCartReady(
-    CartState cartState, {
-    bool requireWardrobeKitDetails = false,
-  }) async {
-    final invalidItems = cartState.items
-        .where((item) => !isApiUuid(item.productId))
-        .toList();
-    if (invalidItems.isNotEmpty) {
-      throw const ApiException(
-        'Some cart items are invalid. Remove them and add products from the catalog again.',
-      );
-    }
-
-    // Fast path for checkout: cart mutations are already synced by CartBloc
-    // on add/size/qty updates, so avoid re-posting every item here.
-    final remote = await getCart();
-    if (!remote.isEmpty) return remote;
-
-    // Fallback sync only when server cart is unexpectedly empty.
-    if (cartState.items.isNotEmpty) {
-      var synced = await syncCartState(cartState);
-      if (requireWardrobeKitDetails && cartState.wardrobeItems.isNotEmpty) {
-        synced = await _ensureWardrobeKitCheckoutOnServer(cartState, synced);
+    if (data is Map<String, dynamic>) {
+      final authoritative = cartPayloadLooksAuthoritative(data);
+      final parseSw = Stopwatch()..start();
+      final remote = RemoteCart.fromJson(data);
+      parseSw.stop();
+      if (kDebugMode) {
+        debugPrint(
+          '[CART_PERF] POST CART authoritative=$authoritative '
+          'itemCount=${remote.itemCount} items=${remote.items.length} '
+          'remoteParse=${parseSw.elapsedMilliseconds}ms',
+        );
       }
-      if (!synced.isEmpty) return synced;
-    }
-    return remote;
-  }
-
-  Future<RemoteCart> _ensureWardrobeKitCheckoutOnServer(
-    CartState cartState,
-    RemoteCart synced,
-  ) async {
-    RemoteCart? latest = synced;
-
-    final kitProductId = cartState.wardrobeKitProductId?.trim();
-    if (kitProductId != null && isApiUuid(kitProductId)) {
-      latest = await upsertItem(
-        item: CartItem(
-          id: kitProductId,
-          productId: kitProductId,
-          title: cartState.wardrobeKitName.isNotEmpty
-              ? cartState.wardrobeKitName
-              : 'Wardrobe Kit',
-          imageUrl: '',
-          quantity: 1,
-          isEssential: false,
-        ),
-        cartState: cartState,
+      return CartWriteResult(
+        remote: remote,
+        isAuthoritative: authoritative,
+        durationMs: sw.elapsedMilliseconds,
       );
     }
-
-    for (final item in cartState.wardrobeItems) {
-      latest = await upsertItem(item: item, cartState: cartState);
+    if (kDebugMode) {
+      debugPrint('[CART_PERF] POST CART authoritative=false (no data)');
     }
-
-    final refreshed = latest ?? await getCart();
-    final hasKitProduct = kitProductId != null &&
-        refreshed.items.any((item) => item.productId == kitProductId);
-    final hasKitGarments =
-        refreshed.items.any((item) => item.kitDetails != null);
-
-    if (!hasKitProduct && !hasKitGarments) {
-      throw const ApiException(
-        'Wardrobe kit could not be prepared for checkout. Please go back, '
-        'reselect your kit and delivery details, then try again.',
-      );
-    }
-    return refreshed;
+    return CartWriteResult(
+      remote: const RemoteCart(id: '', items: []),
+      isAuthoritative: false,
+      durationMs: sw.elapsedMilliseconds,
+    );
   }
 
-  Future<Map<String, dynamic>?> _buildKitDetails({
-    required CartItem item,
-    required CartState cartState,
+  Future<Map<String, dynamic>?> subscriptionKitDetails({
+    required String? wardrobeKitId,
+    required String? wardrobeKitProductId,
+    required int durationDays,
+    required String kitName,
+    List<dynamic>? selectedItems,
   }) async {
-    if (item.isEssential) return null;
-
     final session = CheckoutSession.instance;
     var customer = ProfileCache.instance.customer;
     try {
@@ -255,37 +268,216 @@ class CartRepository {
       customer = ProfileCache.instance.customer;
     }
 
-    final addressId = _resolveAddressId(session, customer);
+    var addressId = session.addressId?.toString().trim();
+    if (addressId == null || addressId.isEmpty) {
+      for (final address in customer?.addresses ?? const []) {
+        final id = address.id?.trim();
+        if (id != null && id.isNotEmpty) {
+          addressId = id;
+          break;
+        }
+      }
+    }
+
+    final rawType = (session.kitType ?? kitName).trim();
+    final String resolvedKitType;
+    if (rawType.isNotEmpty &&
+        rawType.toLowerCase() != 'custom' &&
+        rawType.toLowerCase() != 'standard') {
+      resolvedKitType = rawType;
+    } else if (durationDays != null && durationDays > 0) {
+      resolvedKitType = '$durationDays-Day wardrobe Kit';
+    } else {
+      resolvedKitType = rawType.isNotEmpty ? rawType : 'Wardrobe Kit';
+    }
 
     final details = RemoteCartKitDetails(
       gender: session.gender ?? 'male',
       bodyType: session.bodyType ?? 'regular',
-      kitType: session.kitType ??
-          (cartState.wardrobeKitName.isNotEmpty
-              ? cartState.wardrobeKitName.toLowerCase()
-              : 'standard'),
+      kitType: resolvedKitType,
       deliveryDate: session.apiDeliveryDate,
       deliveryTime: session.deliveryTime,
       customerAddressId: addressId,
       height: customer?.height,
       weight: customer?.weight,
-      wardrobeKitId: cartState.wardrobeKitId,
-      wardrobeKitProductId: cartState.wardrobeKitProductId,
-      durationDays: cartState.wardrobeKitDays,
+      wardrobeKitId: wardrobeKitId,
+      wardrobeKitProductId: wardrobeKitProductId,
+      durationDays: durationDays,
+      selectedItems: selectedItems,
     );
-
     final json = details.toJson();
     return json.isEmpty ? null : json;
   }
+}
 
-  String? _resolveAddressId(dynamic session, dynamic customer) {
-    var addressId = session.addressId?.toString().trim();
-    if (addressId != null && addressId.isNotEmpty) return addressId;
+void _printSingleItemCartDebug({
+  required CartWriteRequest request,
+  required Map<String, dynamic> body,
+  required String encoded,
+  required String source,
+  required int requestId,
+}) {
+  if (!kDebugMode) return;
+  debugPrint('========== SINGLE ITEM CART DEBUG ==========');
+  debugPrint('[CART DEBUG] POST REQUEST');
+  debugPrint('source=$source requestId=$requestId');
+  debugPrint('Product ID: ${body['productId']}');
+  debugPrint('Product Name: ${request.productName ?? '-'}');
+  debugPrint('Product Class: ${body['product_class']}');
+  debugPrint('Category: ${body['categoryName'] ?? '-'}');
+  debugPrint('Variant ID: ${body['variantId'] ?? '-'}');
+  debugPrint('Quantity: ${body['quantity']}');
+  debugPrint('Size: ${body['size'] ?? '-'}');
+  debugPrint('item_type: ${body['item_type']}');
+  debugPrint('itemType: ${body['itemType']}');
+  debugPrint(
+    'cart_section: ${body['cart_section'] ?? body['cartSection'] ?? '-'}',
+  );
+  debugPrint(
+    'kitDetails: ${body.containsKey('kitDetails') ? jsonEncode(body['kitDetails']) : '-'}',
+  );
+  debugPrint('FINAL POST BODY:');
+  _printLong(encoded);
+  debugPrint('============================================');
+}
 
-    for (final address in customer?.addresses ?? const []) {
-      final id = address.id?.trim();
-      if (id != null && id.isNotEmpty) return id;
+void _printCartDebugPostRequest({
+  required CartWriteRequest request,
+  required Map<String, dynamic> body,
+  required String encoded,
+  required String source,
+  required int requestId,
+}) {
+  if (!kDebugMode) return;
+  debugPrint('========== CART ADD DEBUG ==========');
+  debugPrint('[CART DEBUG] POST REQUEST');
+  debugPrint('source=$source requestId=$requestId');
+  debugPrint('Product ID: ${body['productId']}');
+  debugPrint('Product Name: ${request.productName ?? '-'}');
+  debugPrint('Product Class: ${body['product_class']}');
+  debugPrint('Item Type: ${body['item_type']}');
+  debugPrint('Item Type (camelCase): ${body['itemType']}');
+  debugPrint('Quantity: ${body['quantity']}');
+  debugPrint('Variant ID: ${body['variantId'] ?? '-'}');
+  debugPrint('Category: ${body['categoryName'] ?? '-'}');
+  debugPrint('Size: ${body['size'] ?? '-'}');
+  debugPrint(
+    'cart_section: ${body['cart_section'] ?? body['cartSection'] ?? '-'}',
+  );
+  debugPrint(
+    'Kit Details: ${body.containsKey('kitDetails') ? jsonEncode(body['kitDetails']) : '-'}',
+  );
+  debugPrint('------------------------------------');
+  debugPrint('FINAL CART POST BODY:');
+  _printLong(encoded);
+  debugPrint('====================================');
+}
+
+void _printCartDebugPostResponse({
+  required Map<String, dynamic> json,
+  required int requestId,
+  required String source,
+}) {
+  if (!kDebugMode) return;
+  debugPrint('[CART DEBUG] POST RESPONSE');
+  debugPrint('source=$source requestId=$requestId');
+  _printLong(jsonEncode(json));
+}
+
+void _printCartDebugGet({
+  required Map<String, dynamic> json,
+  required int requestId,
+  required String source,
+}) {
+  if (!kDebugMode) return;
+  debugPrint('[CART DEBUG] GET CART RESPONSE');
+  debugPrint('source=$source requestId=$requestId');
+  _printLong(jsonEncode(json));
+
+  final data = json['data'];
+  if (data is! Map) {
+    debugPrint('========== CART GET DEBUG ==========');
+    debugPrint('no data');
+    debugPrint('====================================');
+    return;
+  }
+  final map = Map<String, dynamic>.from(data);
+  final sections = map['sections'];
+  int sectionCount(String key) {
+    if (sections is! Map) return 0;
+    final block = sections[key];
+    if (block is! Map) return 0;
+    final listed = block['item_count'] ?? block['itemCount'];
+    if (listed is num) return listed.toInt();
+    final list = block['items'];
+    return list is List ? list.length : 0;
+  }
+
+  debugPrint('========== CART GET DEBUG ==========');
+  debugPrint('sections.subscription count: ${sectionCount('subscription')}');
+  debugPrint(
+    'sections.non_subscription count: ${sectionCount('non_subscription')}',
+  );
+  debugPrint('sections.essentials count: ${sectionCount('essentials')}');
+  debugPrint('sections.kids count: ${sectionCount('kids')}');
+
+  void printRow(String origin, Map row) {
+    final kit = row['kitDetails'] ?? row['kit_details'];
+    debugPrint('--- item ($origin) ---');
+    debugPrint('productId: ${row['productId'] ?? row['product_id']}');
+    debugPrint(
+      'productClass: ${row['productClass'] ?? row['product_class']}',
+    );
+    debugPrint('item_type: ${row['item_type']}');
+    debugPrint('itemType: ${row['itemType']}');
+    if (kit is Map) {
+      debugPrint(
+        'kitDetails.non_subscription: ${kit['non_subscription'] ?? kit['nonSubscription']}',
+      );
+      debugPrint(
+        'kitDetails.cart_section: ${kit['cart_section'] ?? kit['cartSection']}',
+      );
+    } else {
+      debugPrint('kitDetails.non_subscription: -');
+      debugPrint('kitDetails.cart_section: -');
     }
-    return null;
+  }
+
+  final cartItems = map['cartItems'] ?? map['cart_items'];
+  if (cartItems is List) {
+    for (final row in cartItems) {
+      if (row is Map) printRow('cartItems', Map<String, dynamic>.from(row));
+    }
+  }
+  if (sections is Map) {
+    for (final key in [
+      'subscription',
+      'non_subscription',
+      'essentials',
+      'kids',
+    ]) {
+      final block = sections[key];
+      if (block is! Map) continue;
+      final items = block['items'];
+      if (items is! List) continue;
+      for (final row in items) {
+        if (row is Map) {
+          printRow('sections.$key', Map<String, dynamic>.from(row));
+        }
+      }
+    }
+  }
+  debugPrint('====================================');
+}
+
+void _printLong(String text) {
+  const chunk = 800;
+  if (text.length <= chunk) {
+    debugPrint(text);
+    return;
+  }
+  for (var i = 0; i < text.length; i += chunk) {
+    final end = i + chunk > text.length ? text.length : i + chunk;
+    debugPrint(text.substring(i, end));
   }
 }

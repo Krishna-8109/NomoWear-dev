@@ -1,10 +1,14 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:nomowear/core/app_export.dart';
 import 'package:nomowear/core/network/api_exception.dart';
 import 'package:nomowear/core/services/razorpay_service.dart';
+import 'package:nomowear/features/checkout/data/wardrobe_booking_session.dart';
 import 'package:nomowear/features/profile/data/profile_cache.dart';
 import 'package:nomowear/features/profile/data/profile_repository.dart';
 import 'package:nomowear/features/profile/presentation/utils/profile_order_guard.dart';
+import 'package:nomowear/features/subscriptions/data/subscription_cache.dart';
+import 'package:nomowear/features/subscriptions/data/subscription_pricing.dart';
 import 'package:nomowear/features/subscriptions/data/subscription_repository.dart';
 import 'package:razorpay_flutter/razorpay_flutter.dart';
 
@@ -85,14 +89,31 @@ class _MembershipPurchaseScreenState extends State<MembershipPurchaseScreen> {
         razorpayPaymentId: paymentId,
         razorpaySignature: signature,
       );
+      await _subscriptionRepository.getActiveSubscription(forceRefresh: true);
+
+      if (kDebugMode) {
+        final active = SubscriptionCache.instance.activeSubscription;
+        debugPrint(
+          '[SUBSCRIPTION SUCCESS] activeSubscription=${active != null && active.isActive}',
+        );
+      }
+
+      await WardrobeBookingSession.instance.restore();
 
       if (!mounted) return;
       setState(() => _isProcessing = false);
 
+      if (WardrobeBookingSession.instance.awaitingSubscriptionPurchase) {
+        await WardrobeBookingSession.instance.markSubscriptionPurchased();
+      }
+      if (!mounted) return;
+
       Navigator.pushReplacementNamed(
         context,
         AppRoutes.orderSuccessScreen,
-        arguments: paymentId,
+        arguments: const {
+          'isSubscription': true,
+        },
       );
     } on ApiException catch (e) {
       if (!mounted) return;
@@ -133,10 +154,13 @@ class _MembershipPurchaseScreenState extends State<MembershipPurchaseScreen> {
     setState(() => _isProcessing = true);
 
     try {
+      final pricing = SubscriptionPricing.fromPlanPrice(widget.priceString);
+      final payablePaise = pricing.amountInPaise;
       final order = await _subscriptionRepository.createOrder(
         planRef: widget.planRef.isNotEmpty ? widget.planRef : widget.planId,
         planId: widget.planId.isNotEmpty ? widget.planId : widget.planRef,
         billingPeriod: widget.billingPeriod,
+        amount: payablePaise,
       );
 
       if (!mounted) return;
@@ -153,7 +177,7 @@ class _MembershipPurchaseScreenState extends State<MembershipPurchaseScreen> {
       _razorpayService.openCheckout(
         keyId: order.razorpayKeyId,
         orderId: order.razorpayOrderId,
-        amount: order.amount,
+        amount: pricing.razorpayAmountPaise(order.amount),
         currency: order.currency,
         name: customer?.fullName,
         email: customer?.email,
@@ -177,36 +201,28 @@ class _MembershipPurchaseScreenState extends State<MembershipPurchaseScreen> {
     }
   }
 
+  static String _formatIntegerCurrency(num value) {
+    final integerPart = value.round().toString();
+    if (integerPart.length <= 3) return integerPart;
+    final lastThree = integerPart.substring(integerPart.length - 3);
+    final rest = integerPart.substring(0, integerPart.length - 3);
+    final formattedRest = rest.replaceAllMapped(
+      RegExp(r'.{1,2}(?=(.{2})+(?!.))'),
+      (match) => '${match[0]},',
+    );
+    return '$formattedRest,$lastThree';
+  }
+
   @override
   Widget build(BuildContext context) {
-    final cleanPrice =
-        widget.priceString.replaceAll(',', '').replaceAll('₹', '').trim();
-    final subtotal = double.tryParse(cleanPrice) ?? 0.0;
-    final gst = subtotal * 0.18;
-    final grandTotal = subtotal + gst;
-
-    String formatCurrency(double val) {
-      final s = val.toStringAsFixed(2);
-      final parts = s.split('.');
-      var integerPart = parts[0];
-      if (integerPart.length > 3) {
-        final lastThree = integerPart.substring(integerPart.length - 3);
-        var otherNumbers = integerPart.substring(0, integerPart.length - 3);
-        if (otherNumbers.isNotEmpty) {
-          otherNumbers = otherNumbers.replaceAllMapped(
-            RegExp(r'.{1,2}(?=(.{2})+(?!.))'),
-            (match) => '${match[0]},',
-          );
-        }
-        integerPart =
-            otherNumbers.isNotEmpty ? '$otherNumbers,$lastThree' : lastThree;
-      }
-      return '$integerPart.${parts[1]}';
-    }
-
-    final formattedSubtotal = '₹${widget.priceString.trim()}';
-    final formattedGst = '₹ ${formatCurrency(gst)}';
-    final formattedGrandTotal = '₹${formatCurrency(grandTotal)}';
+    final cleanPrice = widget.priceString
+        .replaceAll(',', '')
+        .replaceAll('₹', '')
+        .trim();
+    final parsedPrice = num.tryParse(cleanPrice) ?? 0;
+    final formattedAmount = '₹${_formatIntegerCurrency(parsedPrice)}';
+    final formattedSubtotal = formattedAmount;
+    final formattedGrandTotal = formattedAmount;
 
     return Scaffold(
       backgroundColor: const Color(0xFF0F1012),
@@ -219,7 +235,7 @@ class _MembershipPurchaseScreenState extends State<MembershipPurchaseScreen> {
           onPressed: _isProcessing ? null : () => Navigator.pop(context),
         ),
         title: Text(
-          'Cart',
+          'Subscription Plans',
           style: CustomTextStyles.openSansSemiBold.copyWith(
             fontSize: 18,
             color: AppColours.primary,
@@ -356,9 +372,6 @@ class _MembershipPurchaseScreenState extends State<MembershipPurchaseScreen> {
                     ),
                     SizedBox(height: 24.h),
                     _buildSummaryRow('Subtotal', formattedSubtotal, false),
-                    SizedBox(height: 16.h),
-                    _buildSummaryRow('GST (18%)', formattedGst, false,
-                        isGreyPrice: true),
                     SizedBox(height: 20.h),
                     Divider(color: AppColours.primary, thickness: 0.2),
                     SizedBox(height: 20.h),

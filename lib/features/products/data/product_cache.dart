@@ -38,7 +38,10 @@ class ProductCache {
     return null;
   }
 
+  Map<String, dynamic>? lastNearbyMetadata;
+
   void clear() {
     _products = null;
+    lastNearbyMetadata = null;
   }
 }

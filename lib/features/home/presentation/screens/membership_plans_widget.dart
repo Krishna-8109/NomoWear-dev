@@ -79,22 +79,10 @@ class _MembershipPlansWidgetState extends State<MembershipPlansWidget> {
   }
 
   List<String> _featuresForCategory(PlanCategory category) {
-    if (category.plans.isNotEmpty) {
-      final first = category.plans.first;
-      if (first.features.isNotEmpty) return first.features;
-      return [
-        '${first.durationDays} days',
-        '${first.maxGarments} garments',
-        'From ₹${first.monthPrice.round()}/month',
-      ];
+    if (category.features.isNotEmpty) {
+      return category.features;
     }
-    if (category.description != null && category.description!.isNotEmpty) {
-      return [category.description!];
-    }
-    return const [
-      'Flexible duration-based limits',
-      'Standard door-step delivery',
-    ];
+    return const [];
   }
 
   String _buttonLabel(PlanCategory category) {

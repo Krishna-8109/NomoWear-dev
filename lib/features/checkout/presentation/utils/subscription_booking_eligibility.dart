@@ -1,5 +1,4 @@
 import 'package:nomowear/features/subscriptions/data/models/active_subscription.dart';
-import 'package:nomowear/features/subscriptions/data/subscription_garment_balance.dart';
 import 'package:nomowear/features/subscriptions/data/subscription_repository.dart';
 
 enum SubscriptionBookingUnavailableReason {
@@ -8,6 +7,7 @@ enum SubscriptionBookingUnavailableReason {
   noActiveSubscription,
   bookingsExhausted,
   garmentsExhausted,
+  networkError,
 }
 
 class SubscriptionBookingEligibility {
@@ -31,6 +31,8 @@ class SubscriptionBookingEligibility {
         return 'Your subscription garment limit has been reached for this period.';
       case SubscriptionBookingUnavailableReason.notLoggedIn:
         return 'Please log in to use your subscription.';
+      case SubscriptionBookingUnavailableReason.networkError:
+        return 'Unable to verify subscription status. Please check your network connection and retry.';
       case SubscriptionBookingUnavailableReason.none:
         return 'Subscription is unavailable for this booking.';
     }
@@ -62,19 +64,6 @@ class SubscriptionBookingEligibility {
         );
       }
 
-      // Ensure garment balance is fresh before allowing another booking.
-      final remaining = await SubscriptionGarmentBalance.resolveAndCache(
-        subscriptionRepository: subscriptionRepository,
-        forceRefresh: forceRefresh,
-      );
-      if (remaining != null && remaining <= 0) {
-        return SubscriptionBookingEligibility(
-          canBookWithSubscription: false,
-          subscription: active,
-          reason: SubscriptionBookingUnavailableReason.garmentsExhausted,
-        );
-      }
-
       return SubscriptionBookingEligibility(
         canBookWithSubscription: true,
         subscription: active,
@@ -89,7 +78,7 @@ class SubscriptionBookingEligibility {
       }
       return const SubscriptionBookingEligibility(
         canBookWithSubscription: false,
-        reason: SubscriptionBookingUnavailableReason.noActiveSubscription,
+        reason: SubscriptionBookingUnavailableReason.networkError,
       );
     }
   }

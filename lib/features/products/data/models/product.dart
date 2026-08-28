@@ -22,8 +22,11 @@ class Product {
   final String productName;
   final String productSlug;
   final String productClass;
+  final String? itemType;
   final bool hasVariants;
   final String actualPrice;
+  final String? costPrice;
+  final String? description;
   final String? primaryImageUrl;
   final List<String> imageUrls;
   final String? categoryName;
@@ -38,8 +41,11 @@ class Product {
     required this.productName,
     required this.productSlug,
     required this.productClass,
+    this.itemType,
     required this.hasVariants,
     required this.actualPrice,
+    this.costPrice,
+    this.description,
     this.primaryImageUrl,
     this.imageUrls = const [],
     this.categoryName,
@@ -49,6 +55,20 @@ class Product {
     this.items = const [],
     this.variants = const [],
   });
+
+  String? get displayImageUrl {
+    if (primaryImageUrl != null && primaryImageUrl!.trim().isNotEmpty) {
+      return primaryImageUrl;
+    }
+    if (imageUrls.isNotEmpty) return imageUrls.first;
+    return null;
+  }
+
+  String? get displayDescription {
+    final value = description?.trim();
+    if (value == null || value.isEmpty) return null;
+    return value;
+  }
 
   bool get isWardrobeKit => productClass == 'wardrobe_kit';
 
@@ -117,10 +137,14 @@ class Product {
       productClass: json['product_class']?.toString() ??
           json['productClass']?.toString() ??
           '',
+      itemType: _nonEmpty(json['item_type'] ?? json['itemType']),
       hasVariants: _parseBool(json['has_variants'] ?? json['hasVariants']),
       actualPrice: json['actual_price']?.toString() ??
           json['actualPrice']?.toString() ??
           '0',
+      costPrice: json['cost_price']?.toString() ??
+          json['costPrice']?.toString(),
+      description: _nonEmpty(json['description']),
       primaryImageUrl: _nonEmpty(
         json['primary_image_url'] ?? json['primaryImageUrl'],
       ),

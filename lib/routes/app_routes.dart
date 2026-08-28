@@ -77,21 +77,37 @@ class AppRoutes {
     profileScreen: (context) => const ProfileScreen(),
     editProfileScreen: (context) => const EditProfileScreen(),
     homeScreen: (context) {
-      final initialTabIndex = ModalRoute.of(context)?.settings.arguments as int? ?? 0;
-      return HomeScreen(initialTabIndex: initialTabIndex);
+      final args = ModalRoute.of(context)?.settings.arguments;
+      var initialTabIndex = 0;
+      var refreshHomeOnEnter = false;
+      var refreshSource = 'navigation';
+      if (args is int) {
+        initialTabIndex = args;
+      } else if (args is Map) {
+        final tab = args['initialTabIndex'];
+        if (tab is int) initialTabIndex = tab;
+        refreshHomeOnEnter = args['refreshHome'] == true;
+        final source = args['refreshSource']?.toString().trim();
+        if (source != null && source.isNotEmpty) {
+          refreshSource = source;
+        }
+      }
+      return HomeScreen(
+        initialTabIndex: initialTabIndex,
+        refreshHomeOnEnter: refreshHomeOnEnter,
+        refreshSource: refreshSource,
+      );
     },
     notificationsScreen: (context) => const NotificationsScreen(),
     categoriesScreen: (context) => const CategoriesScreen(),
     wardrobeScreen: (context) {
       final category =
-          ModalRoute.of(context)!.settings.arguments as String? ??
-              'Comfort Wardrobe';
+          ModalRoute.of(context)!.settings.arguments as String? ?? '';
       return WardrobeScreen(category: category);
     },
     screenshotScreen: (context) {
       final category =
-          ModalRoute.of(context)!.settings.arguments as String? ??
-              'Comfort Wardrobe';
+          ModalRoute.of(context)!.settings.arguments as String? ?? '';
       return ScreenshotScreen(wardrobeCategory: category);
     },
     addNewAddressScreen: (context) {
@@ -112,11 +128,29 @@ class AppRoutes {
           initialAreaTitle: args['areaTitle']?.toString(),
           initialLatitude: readCoord(args['latitude']),
           initialLongitude: readCoord(args['longitude']),
+          initialBuildingNumber: args['buildingNumber']?.toString(),
+          initialStreetName: args['streetName']?.toString(),
         );
       }
       return const AddNewAddressScreen();
     },
-    selectAddressScreen: (context) => const SelectAddressScreen(),
+    selectAddressScreen: (context) {
+      final args = ModalRoute.of(context)?.settings.arguments;
+      if (args is Map) {
+        double? readCoord(dynamic value) {
+          if (value is double) return value;
+          if (value is num) return value.toDouble();
+          if (value is String) return double.tryParse(value);
+          return null;
+        }
+
+        return SelectAddressScreen(
+          initialLatitude: readCoord(args['latitude']),
+          initialLongitude: readCoord(args['longitude']),
+        );
+      }
+      return const SelectAddressScreen();
+    },
     membershipPurchaseScreen: (context) {
       final args =
           ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>? ??
@@ -159,7 +193,11 @@ class AppRoutes {
       final args = ModalRoute.of(context)?.settings.arguments;
       var orderId = '#NMW-829410';
       var orderIdDisplay = orderId;
+      var isSubscription = false;
+      var continueToWardrobeKit = false;
       if (args is Map) {
+        isSubscription = args['isSubscription'] == true;
+        continueToWardrobeKit = args['continueToWardrobeKit'] == true;
         orderId = args['orderId']?.toString() ?? orderId;
         orderIdDisplay = args['orderNumber']?.toString() ?? orderId;
       } else if (args is String && args.isNotEmpty) {
@@ -169,6 +207,8 @@ class AppRoutes {
       return OrderSuccessScreen(
         orderId: orderId,
         orderIdDisplay: orderIdDisplay,
+        isSubscription: isSubscription,
+        continueToWardrobeKit: continueToWardrobeKit,
       );
     },
     orderTrackingScreen: (context) {

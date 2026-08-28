@@ -381,6 +381,8 @@ class OrderHistoryLineItem {
     this.imageUrl,
     this.productClass,
     this.kitDetails,
+    this.itemType,
+    this.cartSection,
   });
 
   final String? productId;
@@ -392,6 +394,8 @@ class OrderHistoryLineItem {
   final String? imageUrl;
   final String? productClass;
   final OrderLineKitDetails? kitDetails;
+  final String? itemType;
+  final String? cartSection;
 
   factory OrderHistoryLineItem.fromJson(Map<String, dynamic> json) {
     final kitRaw = json['kitDetails'] ?? json['kit_details'];
@@ -448,6 +452,10 @@ class OrderHistoryLineItem {
       kitDetails: kitRaw is Map
           ? OrderLineKitDetails.fromJson(Map<String, dynamic>.from(kitRaw))
           : null,
+      itemType: json['item_type']?.toString() ??
+          json['itemType']?.toString(),
+      cartSection: json['cart_section']?.toString() ??
+          json['cartSection']?.toString(),
     );
   }
 
@@ -579,12 +587,16 @@ class OrderKitSelectedItem {
     this.productName,
     this.size,
     this.primaryImageUrl,
+    this.price = 0,
+    this.quantity = 1,
   });
 
   final String? productId;
   final String? productName;
   final String? size;
   final String? primaryImageUrl;
+  final num price;
+  final int quantity;
 
   factory OrderKitSelectedItem.fromJson(Map<String, dynamic> json) {
     return OrderKitSelectedItem(
@@ -597,6 +609,8 @@ class OrderKitSelectedItem {
           json['primaryImageUrl']?.toString() ??
           json['image_url']?.toString() ??
           json['imageUrl']?.toString(),
+      price: OrderHistoryItem._num(json['price']),
+      quantity: OrderHistoryItem._int(json['quantity']) ?? 1,
     );
   }
 }

@@ -1,16 +1,23 @@
 import 'dart:math' show pi;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:nomowear/core/app_export.dart';
 import 'package:nomowear/core/network/api_exception.dart';
 import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
 import 'package:nomowear/features/checkout/data/checkout_session.dart';
+import 'package:nomowear/features/checkout/data/wardrobe_booking_session.dart';
+import 'package:nomowear/features/checkout/data/subscription_kit_preferences.dart';
 import 'package:nomowear/features/products/data/product_cache.dart';
 import 'package:nomowear/features/products/data/product_catalog.dart';
+import 'package:nomowear/features/products/data/product_repository.dart';
 import 'package:nomowear/features/profile/domain/saved_address.dart';
 import 'package:nomowear/features/subscriptions/data/subscription_garment_balance.dart';
+import 'package:nomowear/features/subscriptions/data/models/active_subscription.dart';
+import 'package:nomowear/features/subscriptions/data/subscription_repository.dart';
 import 'package:nomowear/features/wardrobe/data/models/wardrobe_kit.dart';
 import 'package:nomowear/features/wardrobe/data/wardrobe_kit_repository.dart';
+import 'package:nomowear/core/services/google_maps_service.dart';
 
 class ScreenshotScreen extends StatefulWidget {
   final String wardrobeCategory;
@@ -32,6 +39,38 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
   List<WardrobeKit> _kits = [];
   bool _loadingKits = true;
   String? _kitsError;
+  int? _subscriptionRemaining;
+  ActiveSubscription? _activeSubscription;
+
+  final Map<String, bool> _kitEligibility = {};
+
+  int? get _effectiveRemainingGarments {
+    if (_subscriptionRemaining != null) return _subscriptionRemaining;
+    final sub = _activeSubscription;
+    if (sub == null) return null;
+    if (sub.remainingGarments != null) return sub.remainingGarments;
+    if (sub.usedGarments != null) {
+      final rem = sub.maxGarments - sub.usedGarments!;
+      return rem < 0 ? 0 : rem;
+    }
+    return sub.apiRemainingGarments ?? sub.maxGarments;
+  }
+
+  bool _computeKitEligibility(WardrobeKit kit, int remainingGarments) {
+    if (remainingGarments <= 0) return false;
+
+    final days = kit.durationDays;
+    if (days <= 1 || kit.maxItems <= 4) {
+      return remainingGarments >= 1;
+    } else if (days <= 3 || (kit.maxItems >= 5 && kit.maxItems <= 8)) {
+      return remainingGarments >= 5;
+    } else if (days <= 5 || (kit.maxItems >= 9 && kit.maxItems <= 11)) {
+      return remainingGarments >= 9;
+    } else if (days >= 7 || kit.maxItems >= 12) {
+      return remainingGarments >= 12;
+    }
+    return remainingGarments >= 1;
+  }
 
   DateTime? _selectedDeliveryDate;
   DateTime _calendarMonth = DateTime(
@@ -53,6 +92,7 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
   bool _loadingAddresses = true;
   String? _addressesError;
   int _selectedAddressIndex = 0;
+  bool _isSubmittingNext = false;
 
   @override
   void initState() {
@@ -95,6 +135,10 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
     }
   }
 
+  bool get _isSubscriptionKitFlow =>
+      CheckoutSession.instance.useSubscriptionBooking &&
+      !CheckoutSession.instance.continueWithoutMembership;
+
   List<WardrobeKit> get _filteredKits {
     final gender = isMale ? 'male' : 'female';
     return _kits
@@ -121,12 +165,68 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
 
     try {
       final kits = await _wardrobeKitRepository.getWardrobeKits();
+      int? remaining;
+      ActiveSubscription? activeSub;
+
+      if (_isSubscriptionKitFlow) {
+        remaining = await SubscriptionGarmentBalance.resolveAndCache(
+          forceRefresh: true,
+        );
+        final subRepo = SubscriptionRepository();
+        activeSub = await subRepo.getActiveSubscription(forceRefresh: true);
+      }
+
+      final Map<String, bool> eligibilityMap = {};
+      final effRemaining = remaining ??
+          activeSub?.remainingGarments ??
+          (activeSub != null && activeSub.usedGarments != null
+              ? (activeSub.maxGarments - activeSub.usedGarments!)
+                  .clamp(0, activeSub.maxGarments)
+              : activeSub?.apiRemainingGarments ?? activeSub?.maxGarments);
+
+      for (final kit in kits) {
+        if (!_isSubscriptionKitFlow || effRemaining == null) {
+          eligibilityMap[kit.id] = true;
+        } else {
+          eligibilityMap[kit.id] =
+              _computeKitEligibility(kit, effRemaining);
+        }
+      }
+
+      // Check per-kit eligibility from API concurrently if available
+      if (_isSubscriptionKitFlow) {
+        await Future.wait(
+          kits.map((kit) async {
+            try {
+              final response =
+                  await _wardrobeKitRepository.checkEligibility(kit.id);
+              if (response.containsKey('isEligible') ||
+                  response.containsKey('is_eligible') ||
+                  response.containsKey('eligible')) {
+                final isEligible = response['isEligible'] == true ||
+                    response['is_eligible'] == true ||
+                    response['eligible'] == true;
+                eligibilityMap[kit.id] = isEligible;
+              }
+            } catch (_) {
+              // Retain computed entitlement eligibility on error
+            }
+          }),
+        );
+      }
+
       if (!mounted) return;
       setState(() {
         _kits = kits;
+        _subscriptionRemaining = remaining;
+        _activeSubscription = activeSub;
+        _kitEligibility
+          ..clear()
+          ..addAll(eligibilityMap);
         _loadingKits = false;
         _syncSelectedKit();
       });
+      _logWardrobeKitAvailability();
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() {
@@ -152,10 +252,33 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
       _selectedKitId = null;
       return;
     }
-    final hasSelection =
-        _selectedKitId != null && kits.any((kit) => kit.id == _selectedKitId);
-    if (!hasSelection) {
-      _selectedKitId = kits.first.id;
+    final enabledKits = kits.where((k) => _isKitEnabled(k)).toList();
+    if (_selectedKitId == null ||
+        !enabledKits.any((kit) => kit.id == _selectedKitId)) {
+      _selectedKitId = enabledKits.isNotEmpty ? enabledKits.first.id : null;
+    }
+  }
+
+  bool _isKitEnabled(WardrobeKit kit) {
+    if (!_isSubscriptionKitFlow) return true;
+    if (_kitEligibility.containsKey(kit.id)) {
+      return _kitEligibility[kit.id]!;
+    }
+    final remaining = _effectiveRemainingGarments;
+    if (remaining != null) {
+      return _computeKitEligibility(kit, remaining);
+    }
+    return true;
+  }
+
+  void _logWardrobeKitAvailability() {
+    if (!kDebugMode) return;
+    final remaining = _subscriptionRemaining;
+    debugPrint('[WARDROBE_KIT] subscriptionRemaining=$remaining');
+    for (final kit in _filteredKits) {
+      debugPrint(
+        '[WARDROBE_KIT] ${kit.durationDays}Day required=${kit.maxItems}',
+      );
     }
   }
 
@@ -319,11 +442,15 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0F1012),
-      body: SafeArea(
-        child: Column(
-          children: [
-            _buildAppBar(),
-            Container(
+      body: Stack(
+        children: [
+          SafeArea(
+            child: AbsorbPointer(
+              absorbing: _isSubmittingNext,
+              child: Column(
+                children: [
+                  _buildAppBar(),
+                  Container(
               height: 2,
               width: double.infinity,
               decoration: BoxDecoration(
@@ -361,6 +488,20 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
             ),
           ],
         ),
+      ),
+    ),
+    if (_isSubmittingNext)
+      Positioned.fill(
+        child: Container(
+                color: Colors.black.withOpacity(0.6),
+                child: const Center(
+                  child: CircularProgressIndicator(
+                    color: AppColours.primary,
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -587,12 +728,12 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
   }
 
   Widget _buildKitGarmentLabel(WardrobeKit kit) {
-    if (_selectedKitId != kit.id || kit.maxItems <= 0) {
+    if (kit.maxItems <= 0) {
       return SizedBox(height: 14.h);
     }
 
     return Text(
-      'Max No of Garments: ${kit.maxItems}',
+      '${kit.maxItems} garments',
       textAlign: TextAlign.center,
       style: CustomTextStyles.openSansBold.copyWith(
         fontSize: 10,
@@ -601,25 +742,38 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
     );
   }
 
+  void _onKitSelected(WardrobeKit kit) {
+    setState(() {
+      _selectedKitId = kit.id;
+    });
+  }
+
   Widget _buildKitOption(WardrobeKit kit) {
     final isActive = _selectedKitId == kit.id;
+    final isEnabled = _isKitEnabled(kit);
     return GestureDetector(
-      onTap: () => setState(() => _selectedKitId = kit.id),
-      child: Container(
-        width: double.infinity,
-        padding: EdgeInsets.symmetric(horizontal: 10.w, vertical: 12.h),
-        decoration: BoxDecoration(
-          color: isActive ? AppColours.primary.withOpacity(0.35) : const Color(0xFF16181D),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isActive ? AppColours.primary : AppColours.primary.withOpacity(0.45),
-            width: isActive ? 1.5 : 1,
+      onTap: isEnabled ? () => _onKitSelected(kit) : null,
+      child: Opacity(
+        opacity: isEnabled ? 1.0 : 0.4,
+        child: Container(
+          width: double.infinity,
+          padding: EdgeInsets.symmetric(horizontal: 10.w, vertical: 12.h),
+          decoration: BoxDecoration(
+            color: isActive
+                ? AppColours.primary.withOpacity(0.35)
+                : const Color(0xFF16181D),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isActive
+                  ? AppColours.primary
+                  : AppColours.primary.withOpacity(0.45),
+              width: isActive ? 1.5 : 1,
+            ),
           ),
-        ),
-        child: Stack(
-          children: [
-            Padding(
-              padding: EdgeInsets.only(right: isActive ? 24.w : 0),
+          child: Stack(
+            children: [
+              Padding(
+                padding: EdgeInsets.only(right: isActive ? 24.w : 0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -643,10 +797,10 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
                   SizedBox(height: 4.h),
                   Text(
                     kit.description,
-                    maxLines: 2,
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: CustomTextStyles.openSansRegular.copyWith(
-                      fontSize: 10.fSize,
+                      fontSize: 9,
                       color: const Color(0xFFF5E6C8).withAlpha((0.45 * 255).round()),
                     ),
                   ),
@@ -662,6 +816,7 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
               ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -1190,6 +1345,17 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
                               fontWeight: FontWeight.bold,
                             ),
                           ),
+                          if (a.contactName.isNotEmpty) ...[
+                            SizedBox(height: 6.h),
+                            Text(
+                              a.contactName,
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 13.fSize,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
                           SizedBox(height: 6.h),
                           Text(
                             a.addressLines,
@@ -1269,88 +1435,176 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
         ],
       ),
       child: ElevatedButton(
-        onPressed: _selectedKit == null
+        onPressed: _selectedKit == null || _isSubmittingNext
             ? null
             : () async {
-                if (_selectedDeliveryDate == null) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: const Text('Please select a delivery date.'),
-                      backgroundColor: AppColours.primary,
-                      behavior: SnackBarBehavior.floating,
-                    ),
-                  );
-                  return;
-                }
-                if (_selectedTimeLabel == null || _selectedTimeLabel!.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: const Text('Please select a delivery time.'),
-                      backgroundColor: AppColours.primary,
-                      behavior: SnackBarBehavior.floating,
-                    ),
-                  );
-                  return;
-                }
-                if (_savedAddresses.isEmpty) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: const Text('Please add a delivery address.'),
-                      backgroundColor: AppColours.primary,
-                      behavior: SnackBarBehavior.floating,
-                    ),
-                  );
-                  return;
-                }
-
-                final selectedAddress = _savedAddresses[_selectedAddressIndex];
-                final kit = _selectedKit!;
-                final wardrobeKitProduct = ProductCache.instance.products == null
-                    ? null
-                    : ProductCatalog.findWardrobeKit(
-                        ProductCache.instance.products!,
-                        widget.wardrobeCategory,
-                      );
-
-                CheckoutSession.instance.setDelivery(
-                  addressId: selectedAddress.id,
-                  addressTitle: selectedAddress.title,
-                  addressLines: selectedAddress.addressLines,
-                  deliveryDate: _selectedDeliveryDate,
-                  deliveryTime: _selectedTimeLabel,
-                  gender: isMale ? 'male' : 'female',
-                  kitType: kit.kitType,
-                  wardrobeCategory: widget.wardrobeCategory,
-                );
-
-                // Always store the kit's own max. Subscription remaining is
-                // applied at validation time so a refreshed balance can raise
-                // the cap without re-picking the kit.
-                final maxGarments = kit.maxItems;
-                if (CheckoutSession.instance.useSubscriptionBooking) {
-                  await SubscriptionGarmentBalance.resolveAndCache(
-                    forceRefresh: true,
-                  );
-                }
-
-                if (!context.mounted) return;
-                context.read<CartBloc>().add(
-                      SetWardrobeKitEvent(
-                        kitId: kit.id,
-                        wardrobeKitProductId: wardrobeKitProduct?.id,
-                        kitDays: kit.durationDays,
-                        kitName: kit.displayTitle,
-                        maxGarments: maxGarments,
-                        kitPrice: kit.price,
-                        wardrobeCategory: widget.wardrobeCategory,
+                setState(() => _isSubmittingNext = true);
+                try {
+                  if (_selectedDeliveryDate == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: const Text('Please select a delivery date.'),
+                        backgroundColor: AppColours.primary,
+                        behavior: SnackBarBehavior.floating,
                       ),
                     );
-                if (!context.mounted) return;
-          Navigator.pushNamed(
-            context,
-            AppRoutes.wardrobeScreen,
-            arguments: widget.wardrobeCategory,
-          );
+                    return;
+                  }
+                  if (_selectedTimeLabel == null || _selectedTimeLabel!.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: const Text('Please select a delivery time.'),
+                        backgroundColor: AppColours.primary,
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                    return;
+                  }
+                  if (_savedAddresses.isEmpty) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: const Text('Please add a delivery address.'),
+                        backgroundColor: AppColours.primary,
+                        behavior: SnackBarBehavior.floating,
+                      ),
+                    );
+                    return;
+                  }
+
+                  final selectedAddress = _savedAddresses[_selectedAddressIndex];
+                  final kit = _selectedKit!;
+                  final wardrobeKitProduct = ProductCache.instance.products == null
+                      ? null
+                      : ProductCatalog.findWardrobeKit(
+                          ProductCache.instance.products!,
+                          widget.wardrobeCategory,
+                        );
+
+                  // ── Resolve address coordinates ──────────────────────────
+                  // The backend customer-addresses API does not return lat/lng.
+                  // Geocode the address text now (before opening Products) so
+                  // product_repository.dart can call the nearby-products API
+                  // without showing "Address Required".
+                  double? resolvedLat = selectedAddress.latitude;
+                  double? resolvedLng = selectedAddress.longitude;
+
+                  if (resolvedLat == null || resolvedLng == null) {
+                    final addressText = selectedAddress.addressLines.trim().isNotEmpty
+                        ? selectedAddress.addressLines
+                        : selectedAddress.title;
+                    if (addressText.isNotEmpty) {
+                      try {
+                        final mapsService = GoogleMapsService();
+                        final predictions = await mapsService.searchPlaces(addressText);
+                        if (predictions.isNotEmpty) {
+                          final resolved = await mapsService.resolvePlace(predictions.first.placeId);
+                          if (resolved != null) {
+                            resolvedLat = resolved.latitude;
+                            resolvedLng = resolved.longitude;
+                            if (kDebugMode) {
+                              debugPrint('[KIT_SCREEN] Geocoded address "${selectedAddress.title}" → $resolvedLat,$resolvedLng');
+                            }
+                          }
+                        }
+                      } catch (e) {
+                        if (kDebugMode) {
+                          debugPrint('[KIT_SCREEN] Geocode failed: $e');
+                        }
+                      }
+                    }
+                  }
+
+                  CheckoutSession.instance.setDelivery(
+                    addressId: selectedAddress.id,
+                    addressTitle: selectedAddress.title,
+                    addressLines: selectedAddress.addressLines,
+                    addressLatitude: resolvedLat,
+                    addressLongitude: resolvedLng,
+                    deliveryDate: _selectedDeliveryDate,
+                    deliveryTime: _selectedTimeLabel,
+                    gender: isMale ? 'male' : 'female',
+                    kitType: kit.displayTitle,
+                    wardrobeCategory: widget.wardrobeCategory,
+                  );
+
+                  ProductCache.instance.clear();
+
+                  if (CheckoutSession.instance.useSubscriptionBooking) {
+                    await SubscriptionGarmentBalance.resolveAndCache(
+                      forceRefresh: true,
+                    );
+                  }
+
+                  await SubscriptionKitPreferences.instance.saveFromKitSetup(
+                    kitId: kit.id,
+                    wardrobeKitProductId: wardrobeKitProduct?.id,
+                    kitDays: kit.durationDays,
+                    kitName: kit.displayTitle,
+                    maxGarments: kit.maxItems,
+                    kitPrice: kit.price,
+                    wardrobeCategory: widget.wardrobeCategory,
+                    addressId: selectedAddress.id,
+                    addressTitle: selectedAddress.title,
+                    addressLines: selectedAddress.addressLines,
+                    deliveryDate: _selectedDeliveryDate!,
+                    deliveryTime: _selectedTimeLabel!,
+                    gender: isMale ? 'male' : 'female',
+                    kitType: kit.displayTitle,
+                  );
+
+                  // Always store the kit's own max. Subscription remaining is
+                  // applied at validation time so a refreshed balance can raise
+                  // the cap without re-picking the kit.
+                  final maxGarments = kit.maxItems;
+
+                  if (!context.mounted) return;
+                  await WardrobeBookingSession.instance.markKitSelected(
+                    kitId: kit.id,
+                    kitGarmentLimit: maxGarments,
+                  );
+                  context.read<CartBloc>().add(
+                        SetWardrobeKitEvent(
+                          kitId: kit.id,
+                          wardrobeKitProductId: wardrobeKitProduct?.id,
+                          kitDays: kit.durationDays,
+                          kitName: kit.displayTitle,
+                          maxGarments: maxGarments,
+                          kitPrice: kit.price,
+                          wardrobeCategory: widget.wardrobeCategory,
+                          wardrobeCategoryId: WardrobeBookingSession
+                              .instance.wardrobeCategoryId,
+                        ),
+                      );
+
+                  if (kDebugMode) {
+                    debugPrint('[WARDROBE_KIT_NEXT_CLICKED]');
+                  }
+
+                  try {
+                    await ProductRepository().getProducts(
+                      forceRefresh: true,
+                      useNearbyLocation: true,
+                      tab: widget.wardrobeCategory,
+                      limit: 50,
+                      page: 1,
+                    );
+                  } catch (e) {
+                    if (kDebugMode) {
+                      debugPrint('[NEARBY_API_CALL_FAILED] error=$e');
+                    }
+                  }
+
+                  if (!context.mounted) return;
+                  Navigator.pushNamed(
+                    context,
+                    AppRoutes.wardrobeScreen,
+                    arguments: widget.wardrobeCategory,
+                  );
+                } finally {
+                  if (mounted) {
+                    setState(() => _isSubmittingNext = false);
+                  }
+                }
         },
         style: ElevatedButton.styleFrom(
           backgroundColor: Colors.transparent,
@@ -1358,12 +1612,11 @@ class _ScreenshotScreenState extends State<ScreenshotScreen> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         ),
         child: Text(
-          "NEXT",
+          'NEXT',
           style: TextStyle(
             color: Colors.black,
             fontSize: 16.fSize,
             fontWeight: FontWeight.bold,
-            letterSpacing: 1.2,
           ),
         ),
       ),

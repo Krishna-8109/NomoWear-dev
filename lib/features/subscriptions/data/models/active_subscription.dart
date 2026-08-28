@@ -15,10 +15,12 @@ class ActiveSubscription {
     this.remainingBookings,
     this.usedGarments,
     this.remainingGarments,
+    this.remainingKitDays,
     this.startDate,
     this.endDate,
     this.nextRenewalDate,
     this.createdAt,
+    this.features = const [],
   });
 
   final String id;
@@ -36,10 +38,13 @@ class ActiveSubscription {
   final int? usedGarments;
   /// Garments still available in this subscription period (API, when present).
   final int? remainingGarments;
+  /// Remaining days allowed for wardrobe kits (API, when present).
+  final int? remainingKitDays;
   final String? startDate;
   final String? endDate;
   final String? nextRenewalDate;
   final String? createdAt;
+  final List<String> features;
 
   DateTime? get sortDate {
     for (final iso in [createdAt, startDate, endDate]) {
@@ -90,23 +95,46 @@ class ActiveSubscription {
   bool get shouldDisplay => id.isNotEmpty && isActive;
 
   bool get hasRemainingBookings {
-    final explicitRemaining = remainingBookings;
-    if (explicitRemaining != null) return explicitRemaining > 0;
+    final exhausted = isBookingLimitExhausted;
+    if (exhausted != null) return !exhausted;
+    return noOfBookings > 0;
+  }
+
+  /// true = remaining bookings are known to be 0.
+  /// false = remaining bookings are known to be > 0.
+  /// null = backend did not send enough fields — do NOT treat as 0.
+  bool? get isBookingLimitExhausted {
+    final remaining = remainingBookings;
+    if (remaining != null) return remaining <= 0;
 
     final used = bookingsUsed;
-    if (used != null) return used < noOfBookings;
+    if (used != null && noOfBookings > 0) return used >= noOfBookings;
 
-    return noOfBookings > 0;
+    return null;
   }
 
   int get remainingBookingsCount {
     final explicitRemaining = remainingBookings;
-    if (explicitRemaining != null) return explicitRemaining;
+    if (explicitRemaining != null) {
+      return explicitRemaining < 0 ? 0 : explicitRemaining;
+    }
 
     final used = bookingsUsed;
     if (used != null) return (noOfBookings - used).clamp(0, noOfBookings);
 
-    return noOfBookings;
+    return noOfBookings < 0 ? 0 : noOfBookings;
+  }
+
+  /// Completed bookings in this period from API fields only (never incremented locally).
+  int get usedBookingsCount {
+    final used = bookingsUsed;
+    if (used != null) return used < 0 ? 0 : used;
+
+    final remaining = remainingBookings;
+    if (remaining != null) {
+      return (noOfBookings - remaining).clamp(0, noOfBookings < 0 ? 0 : noOfBookings);
+    }
+    return 0;
   }
 
   /// Remaining garments from API fields only (null when backend did not send usage).
@@ -148,16 +176,17 @@ class ActiveSubscription {
     return 'Expires on $formatted';
   }
 
-  List<String> get features {
-    final periodLabel = isMonthly ? 'month' : 'year';
-    return [
-      '$kitDurationDays days per $periodLabel',
-      '$noOfBookings Bookings per $periodLabel',
-      'Across all categories',
-    ];
-  }
-
   factory ActiveSubscription.fromJson(Map<String, dynamic> json) {
+    final usage = json['usage'] is Map
+        ? Map<String, dynamic>.from(json['usage'] as Map)
+        : const <String, dynamic>{};
+    final bookingUsage = usage['bookings'] is Map
+        ? Map<String, dynamic>.from(usage['bookings'] as Map)
+        : const <String, dynamic>{};
+    final garmentUsage = usage['garments'] is Map
+        ? Map<String, dynamic>.from(usage['garments'] as Map)
+        : const <String, dynamic>{};
+
     return ActiveSubscription(
       id: json['id']?.toString() ?? '',
       planRef: json['planRef']?.toString() ??
@@ -170,12 +199,34 @@ class ActiveSubscription {
       planName: json['planName']?.toString() ??
           json['plan_name']?.toString() ??
           'Membership',
-      kitDurationDays:
-          _parseInt(json['kitDurationDays'] ?? json['kit_duration_days']) ?? 0,
+      kitDurationDays: _parseInt(
+            json['totalPlanDays'] ??
+                json['total_plan_days'] ??
+                json['kitDurationDays'] ??
+                json['kit_duration_days'],
+          ) ??
+          0,
       maxGarments:
-          _parseInt(json['maxGarments'] ?? json['max_garments']) ?? 0,
+          _parseInt(
+            json['maxGarments'] ??
+                json['max_garments'] ??
+                json['totalPlanGarments'] ??
+                json['total_plan_garments'] ??
+                garmentUsage['total'],
+          ) ??
+          0,
       noOfBookings:
-          _parseInt(json['noOfBookings'] ?? json['no_of_bookings']) ?? 0,
+          _parseInt(
+            json['noOfBookings'] ??
+                json['no_of_bookings'] ??
+                json['maxBookings'] ??
+                json['max_bookings'] ??
+                json['totalBookings'] ??
+                json['total_bookings'] ??
+                bookingUsage['total'] ??
+                usage['totalBookings'],
+          ) ??
+          0,
       planPrice: json['planPrice']?.toString() ??
           json['plan_price']?.toString() ??
           '0',
@@ -186,32 +237,61 @@ class ActiveSubscription {
         json['bookingsUsed'] ??
             json['bookings_used'] ??
             json['usedBookings'] ??
-            json['used_bookings'],
+            json['used_bookings'] ??
+            json['completedBookings'] ??
+            json['completed_bookings'] ??
+            bookingUsage['used'] ??
+            usage['bookingsUsed'],
       ),
       remainingBookings: _parseInt(
         json['remainingBookings'] ??
             json['remaining_bookings'] ??
             json['bookingsRemaining'] ??
-            json['bookings_remaining'],
+            json['bookings_remaining'] ??
+            bookingUsage['remaining'] ??
+            usage['remainingBookings'],
       ),
       usedGarments: _parseInt(
         json['usedGarments'] ??
             json['used_garments'] ??
             json['garmentsUsed'] ??
-            json['garments_used'],
+            json['garments_used'] ??
+            garmentUsage['used'] ??
+            usage['usedGarments'],
       ),
       remainingGarments: _parseInt(
         json['remainingGarments'] ??
             json['remaining_garments'] ??
             json['garmentsRemaining'] ??
-            json['garments_remaining'],
+            json['garments_remaining'] ??
+            garmentUsage['remaining'] ??
+            usage['remainingGarments'],
+      ),
+      remainingKitDays: _parseInt(
+        json['remainingKitDays'] ??
+            json['remaining_kit_days'] ??
+            usage['remainingKitDays'],
       ),
       startDate: _nonEmpty(json['startDate'] ?? json['start_date']),
       endDate: _nonEmpty(json['endDate'] ?? json['end_date']),
       nextRenewalDate:
           _nonEmpty(json['nextRenewalDate'] ?? json['next_renewal_date']),
       createdAt: _nonEmpty(json['createdAt'] ?? json['created_at']),
+      features: _parseFeatures(
+        json['features'] ??
+            json['plan_features'] ??
+            json['planFeatures'] ??
+            (json['plan'] is Map ? (json['plan']['features'] ?? json['plan']['plan_features']) : null),
+      ),
     );
+  }
+
+  static List<String> _parseFeatures(dynamic raw) {
+    if (raw is! List) return const [];
+    return raw
+        .map((e) => e?.toString().trim() ?? '')
+        .where((e) => e.isNotEmpty)
+        .toList();
   }
 
   static String formatDisplayDate(String? iso) {

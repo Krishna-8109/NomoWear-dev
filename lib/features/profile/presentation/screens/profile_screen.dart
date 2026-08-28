@@ -248,20 +248,26 @@ import 'package:nomowear/features/profile/data/profile_repository.dart';
                 ),
                 child: ClipOval(
                   child: photoUrl != null && photoUrl.startsWith('http')
-                      ? Image.network(
-                          photoUrl,
-                          fit: BoxFit.cover,
-                          width: 86.w,
-                          height: 86.h,
-                          errorBuilder: (_, __, ___) => Image.asset(
+                      ? (() {
+                          print('PROFILE PROFILE IMAGE URL = $photoUrl');
+                          return Image.network(
+                            photoUrl,
+                            fit: BoxFit.cover,
+                            width: 86.w,
+                            height: 86.h,
+                            errorBuilder: (_, __, ___) => Image.asset(
+                              ImageConstant.homeScreenImg2,
+                              fit: BoxFit.cover,
+                            ),
+                          );
+                        })()
+                      : (() {
+                          print('PROFILE PROFILE IMAGE URL = null (using asset)');
+                          return Image.asset(
                             ImageConstant.homeScreenImg2,
                             fit: BoxFit.cover,
-                          ),
-                        )
-                      : Image.asset(
-                          ImageConstant.homeScreenImg2,
-                          fit: BoxFit.cover,
-                        ),
+                          );
+                        })(),
                 ),
               ),
               SizedBox(height: 12.h),

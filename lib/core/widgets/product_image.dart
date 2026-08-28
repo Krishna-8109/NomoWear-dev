@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:nomowear/core/utils/image_constant.dart';
 import 'package:nomowear/theme/theme_helper.dart';
 
 class ProductImage extends StatelessWidget {
@@ -23,7 +22,11 @@ class ProductImage extends StatelessWidget {
   static String resolveUrl(String? url, {String? fallback}) {
     final trimmed = url?.trim();
     if (trimmed != null && trimmed.isNotEmpty) return trimmed;
-    return fallback ?? ImageConstant.comfortWearImg7;
+    final fallbackTrimmed = fallback?.trim();
+    if (fallbackTrimmed != null && fallbackTrimmed.isNotEmpty) {
+      return fallbackTrimmed;
+    }
+    return '';
   }
 
   static bool isNetworkUrl(String url) {
@@ -40,6 +43,9 @@ class ProductImage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final resolved = resolveUrl(imageUrl, fallback: fallbackAsset);
+    if (resolved.isEmpty) {
+      return _placeholder();
+    }
     Widget image;
 
     if (isNetworkUrl(resolved)) {

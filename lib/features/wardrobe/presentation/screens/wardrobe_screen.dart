@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:nomowear/core/app_export.dart';
 import 'package:nomowear/core/network/api_exception.dart';
 import 'package:nomowear/core/services/auth_storage.dart';
@@ -11,9 +12,14 @@ import 'package:nomowear/features/products/data/product_repository.dart';
 import 'package:nomowear/features/wardrobe/data/filters_repository.dart';
 import 'package:nomowear/features/wardrobe/presentation/screens/product_details_screen.dart';
 import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
+import 'package:nomowear/features/cart/presentation/utils/cart_stock.dart';
 import 'package:nomowear/features/cart/presentation/utils/cart_limits.dart';
+import 'package:nomowear/features/wardrobe/presentation/widgets/variant_selection_sheet.dart';
 import 'package:nomowear/features/cart/presentation/widgets/wardrobe_limit_dialog.dart';
 import 'package:nomowear/features/favorites/presentation/bloc/favorites_bloc.dart';
+import 'package:nomowear/features/checkout/data/wardrobe_booking_session.dart';
+import 'package:nomowear/features/checkout/data/checkout_session.dart';
+import 'package:nomowear/features/profile/domain/saved_address.dart';
 
 /// Normalizes age/size labels so API values like `0-6M` match catalog
 /// values like `0-6 Months`.
@@ -150,13 +156,15 @@ String? _inferKidsGenderTag(WardrobeItem item) {
 }
 
 
-// ─────────────────────────── Data model ───────────────────────────
+// Data model
 class WardrobeItem {
   final String? productId;
   final String title;
   final String description;
   final String imageUrl;
   final String? price;
+  final String? costPrice;
+  final String? actualPrice;
   final List<String> imageUrls;
   final List<String> colorVariantImages;
   final List<String> colorNames;
@@ -164,7 +172,9 @@ class WardrobeItem {
   final List<String> ages;
   final List<String> productDetails;
   final List<ProductVariant> variants;
+  final String stockStatus;
   final String? category;
+  final String? itemType;
   /// `'men'` | `'women'` | `'boy'` | `'girl'` — when null, item appears for both gender filters.
   final String? genderTag;
 
@@ -174,6 +184,8 @@ class WardrobeItem {
     required this.description,
     required this.imageUrl,
     this.price,
+    this.costPrice,
+    this.actualPrice,
     this.imageUrls = const [],
     this.colorVariantImages = const [],
     this.colorNames = const [],
@@ -181,7 +193,9 @@ class WardrobeItem {
     this.ages = const [],
     this.productDetails = const [],
     this.variants = const [],
+    this.stockStatus = 'IN_STOCK',
     this.category,
+    this.itemType,
     this.genderTag,
   });
 
@@ -189,211 +203,8 @@ class WardrobeItem {
       productId ?? '${title}_${imageUrl.hashCode}';
 }
 
-// ─────────────────────── Category catalogue ───────────────────────
-class WardrobeCatalogue {
-  static const Map<String, List<WardrobeItem>> items = {
-    'Comfort Wardrobe': [
-      WardrobeItem(
-        title: 'Classic Grey Hoodie',
-        description: 'Soft, comfortable grey hoodie perfect for lounging.',
-        imageUrl: ImageConstant.comfortWearImg7,
-      ),
-      WardrobeItem(
-        title: 'Black Polo Shirt',
-        description: 'Classic black polo for a casual, everyday look.',
-        imageUrl: ImageConstant.comfortWearImg2,
-      ),
-      WardrobeItem(
-        title: 'Navy Blue Sweatshirt',
-        description: 'Cosy navy blue sweatshirt made for relaxation.',
-        imageUrl: ImageConstant.comfortWearImg3,
-      ),
-      WardrobeItem(
-        title: 'Charcoal Joggers',
-        description: 'Comfortable charcoal joggers for a relaxed fit.',
-        imageUrl: ImageConstant.comfortWearImg4,
-      ),
-      WardrobeItem(
-        title: 'Beige T-Shirt & Shorts',
-        description: 'Lightweight beige set for easygoing days.',
-        imageUrl: ImageConstant.comfortWearImg5,
-      ),
-      WardrobeItem(
-        title: 'Checked Pyjama Set',
-        description: 'Relaxed pyjama set.',
-        imageUrl: ImageConstant.comfortWearImg6,
-        colorNames: ['RED', 'BLUE', 'WHITE', 'BLACK'],
-        colorVariantImages: [
-          'https://images.pexels.com/photos/6311654/pexels-photo-6311654.jpeg?auto=compress&cs=tinysrgb&w=600',
-          'https://images.pexels.com/photos/4066293/pexels-photo-4066293.jpeg?auto=compress&cs=tinysrgb&w=600',
-          'https://images.pexels.com/photos/1192609/pexels-photo-1192609.jpeg?auto=compress&cs=tinysrgb&w=600',
-          'https://images.pexels.com/photos/2220316/pexels-photo-2220316.jpeg?auto=compress&cs=tinysrgb&w=600',
-        ],
-        sizes: ['S', 'M', 'L', 'XL', 'XXL', 'XXXL'],
-        productDetails: [
-          'Fabric: Cotton',
-          'Fit: Slim Fit',
-          'Stretchable',
-          'Length: Regular'
-        ],
-      ),
-    ],
-    'Professional Wardrobe': [
-      WardrobeItem(
-        title: 'Women Suits',
-        description: 'Professional, for office and meetings.',
-        imageUrl: ImageConstant.professionalWearImg1,
-        genderTag: 'women',
-      ),
-      WardrobeItem(
-        title: 'Office Wear',
-        description: 'Classic suits for a official, office look.',
-          imageUrl: ImageConstant.professionalWearImg2
-      ),
-      WardrobeItem(
-        title: 'Formal Shirt',
-        description: 'Cosy navy blue shirt made for office.',
-          imageUrl: ImageConstant.professionalWearImg3
-      ),
-      WardrobeItem(
-        title: 'Casual Suits',
-        description: 'Every day suits for office.',
-          imageUrl: ImageConstant.professionalWearImg4
-      ),
-      WardrobeItem(
-        title: 'Formal Wear',
-        description: 'Premium look suits made for meetings.',
-          imageUrl: ImageConstant.professionalWearImg5
-      ),
-      WardrobeItem(
-        title: 'Blazer',
-        description: 'Tailored fit blazer for Events.',
-          imageUrl: ImageConstant.professionalWearImg6
-      ),
-    ],
-    'Premium Wardrobe': [
-      WardrobeItem(
-        title: 'Kurta',
-        description: 'Soft, comfortable grey hoodie perfect for lounging.',
-          imageUrl: ImageConstant.premiumWearImg1
-      ),
-      WardrobeItem(
-        title: 'Premium Dress',
-        description: 'Classic black polo for a casual, everyday look.',
-        imageUrl: ImageConstant.premiumWearImg2,
-        genderTag: 'women',
-      ),
-      WardrobeItem(
-        title: 'Designer Kurta',
-        description: 'Cosy navy blue sweatshirt made for relaxation.',
-          imageUrl: ImageConstant.premiumWearImg3
-      ),
-      WardrobeItem(
-        title: 'Luxury Saree',
-        description: 'Comfortable charcoal joggers for a relaxed fit.',
-        imageUrl: ImageConstant.premiumWearImg4,
-        genderTag: 'women',
-      ),
-      WardrobeItem(
-        title: 'Designer Black Dress',
-        description: 'Lightweight beige set for easygoing.',
-        imageUrl: ImageConstant.premiumWearImg5,
-        genderTag: 'women',
-      ),
-      WardrobeItem(
-        title: 'Luxury Pink Kurta',
-        description: 'Relaxed pyjama set.',
-          imageUrl: ImageConstant.premiumWearImg6
-      ),
-    ],
-    'Kids Wardrobe': [
-      WardrobeItem(
-        title: 'Premium Pink Dress',
-        description: 'Soft, comfortable pink dress.',
-        imageUrl: ImageConstant.kidsWearImg1,
-        genderTag: 'girl',
-        ages: ['2-4 Years', '4-6 Years'],
-      ),
-      WardrobeItem(
-        title: 'Nice Blue Dress',
-        description: 'Classic light blue for a party look.',
-        imageUrl: ImageConstant.kidsWearImg2,
-        genderTag: 'girl',
-        ages: ['0-6 Months', '6-24 Months'],
-      ),
-      WardrobeItem(
-        title: 'Summer Outfit',
-        description: 'Cosy summer wear made for relaxation.',
-        imageUrl: ImageConstant.kidsWearImg3,
-        genderTag: 'boy',
-        ages: ['2-4 Years', '4-6 Years'],
-      ),
-      WardrobeItem(
-        title: 'Navy Blue Suits',
-        description: 'Comfortable navy blue suits for a party fit.',
-        imageUrl: ImageConstant.kidsWearImg4,
-        genderTag: 'boy',
-        ages: ['4-6 Years', '6-14 Years'],
-      ),
-      WardrobeItem(
-        title: 'Summer Outfit',
-        description: 'Cosy summer wear made for relaxation.',
-        imageUrl: ImageConstant.kidsWearImg5,
-        genderTag: 'girl',
-        ages: ['6-14 Years'],
-      ),
-      WardrobeItem(
-        title: 'Navy Blue Suits',
-        description: 'Comfortable navy blue suits for a party fit.',
-        imageUrl: ImageConstant.kidsWearImg6,
-        genderTag: 'boy',
-        ages: ['0-6 Months', '6-24 Months'],
-      ),
-    ],
-    'Essentials Wardrobe': [
-      WardrobeItem(
-        title: 'Silk Paisley Scarf',
-        description: 'Luxury silk scarf with pattern.',
-        imageUrl: ImageConstant.essentialWearImg1,
-        price: '₹ 1500',
-      ),
-      WardrobeItem(
-        title: 'Navy Blue Tie',
-        description: 'Classic silk tie for formal wear.',
-        imageUrl: ImageConstant.essentialWearImg2,
-        price: '₹ 1200',
-      ),
-      WardrobeItem(
-        title: 'Men Blue Boxers',
-        description: 'Comfortable cotton boxers.',
-        imageUrl: ImageConstant.essentialWearImg3,
-        price: '₹ 700',
-        genderTag: 'men',
-      ),
-      WardrobeItem(
-        title: 'Men White Vests',
-        description: 'Premium cotton vests.',
-        imageUrl: ImageConstant.essentialWearImg4,
-        price: '₹ 900',
-        genderTag: 'men',
-      ),
-      WardrobeItem(
-        title: 'Grey Ankle Socks',
-        description: 'Soft cotton ankle socks.',
-        imageUrl: ImageConstant.essentialWearImg5,
-        price: '₹ 300',
-      ),
-      WardrobeItem(
-        title: 'Beige Cotton Boxers',
-        description: 'Comfortable cotton boxers.',
-        imageUrl: ImageConstant.essentialWearImg6,
-        price: '₹ 700',
-      ),
-    ],
-  };
-}
 
-// ─────────────────────────── Screen ───────────────────────────────
+// Screen
 class WardrobeScreen extends StatefulWidget {
   final String category;
 
@@ -414,6 +225,7 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
   String? _filterGender;
   List<WardrobeItem> _apiItems = [];
   bool _isLoading = true;
+  bool _loadFailed = false;
 
   @override
   void initState() {
@@ -440,25 +252,113 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
     }
 
     try {
+      final mappedTab = ProductCatalog.apiTabForCategory(widget.category);
+      final selectedName = widget.category.trim();
+      final tab = (mappedTab != null && mappedTab.isNotEmpty)
+          ? mappedTab
+          : (selectedName.isEmpty ? null : selectedName);
+          
+      final isNearby = (tab?.toLowerCase().contains('kids') == true) || 
+                       (tab?.toLowerCase().contains('essentials') == true) || 
+                       (action?.toLowerCase() == 'kids') ||
+                       (WardrobeBookingSession.instance.kitSelected);
+
+      final isKidsOrEssentials = (tab?.toLowerCase().contains('kids') == true) || 
+                                 (tab?.toLowerCase().contains('essentials') == true) || 
+                                 (action?.toLowerCase() == 'kids');
+                                 
+      if (!isKidsOrEssentials) {
+        if (kDebugMode) {
+          debugPrint('SAVED_ADDRESS_DEBUG');
+          debugPrint('Comfort Wear screen opened');
+          debugPrint('Fetching saved addresses...');
+          debugPrint('Saved address API started');
+        }
+        await loadSavedAddressesFromProfile();
+        if (kDebugMode) {
+          debugPrint('SAVED_ADDRESS_DEBUG');
+          debugPrint('Saved address API status = Success');
+          debugPrint('savedAddressCount = ${userSavedAddresses.length}');
+          debugPrint('selectedAddressId = ${CheckoutSession.instance.addressId}');
+        }
+      }
+
       var products = await _productRepository.getProducts(
         forceRefresh: forceRefresh,
+        useNearbyLocation: isNearby,
         action: action,
         age: age,
         gender: gender,
+        tab: tab,
+        page: 1,
+        limit: 12,
       );
       _applyListing(products);
-      final hasFilterParams =
-          (action != null && action.trim().isNotEmpty) ||
-          (age != null && age.trim().isNotEmpty) ||
-          (gender != null && gender.trim().isNotEmpty);
-      if (_apiItems.isEmpty && !forceRefresh && !hasFilterParams) {
-        products = await _productRepository.getProducts(forceRefresh: true);
-        _applyListing(products);
-      }
-    } on ApiException {
+      _loadFailed = false;
+    } on ApiException catch (e) {
       _apiItems = [];
+      _loadFailed = true;
+      if (e.message.contains('Location is missing') && mounted) {
+        final mappedTab = ProductCatalog.apiTabForCategory(widget.category);
+        final tab = (mappedTab != null && mappedTab.isNotEmpty)
+            ? mappedTab
+            : (widget.category.trim().isEmpty ? null : widget.category.trim());
+            
+        final isKidsOrEssentials = (tab?.toLowerCase().contains('kids') == true) || 
+                                   (tab?.toLowerCase().contains('essentials') == true) || 
+                                   (action?.toLowerCase() == 'kids');
+        
+        if (isKidsOrEssentials) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(e.message)),
+          );
+        } else {
+          showDialog(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              backgroundColor: const Color(0xFF1A1D21),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              title: Text(
+                'Address Required',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: AppColours.primary,
+                ),
+              ),
+              content: const Text(
+                'Please select a saved address to view these products.',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.white70,
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text(
+                    'Cancel',
+                    style: TextStyle(color: Colors.white54, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () {
+                    Navigator.pop(ctx);
+                    Navigator.pushNamed(context, AppRoutes.myAddressesScreen);
+                  },
+                  child: Text(
+                    'Select Address',
+                    style: TextStyle(color: AppColours.primary, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+      }
     } catch (_) {
       _apiItems = [];
+      _loadFailed = true;
     }
 
     if (mounted) setState(() => _isLoading = false);
@@ -518,6 +418,39 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
     if (variantSize != null && variantSize.isNotEmpty) return variantSize;
     if (item.sizes.isNotEmpty) return item.sizes.first;
     return 'M';
+  }
+
+  bool _isOutOfStockStatus(String status) {
+    final normalized = status.trim().toUpperCase();
+    if (normalized.isEmpty) return false;
+    return normalized == 'OUT_OF_STOCK' ||
+        normalized == 'OUT OF STOCK' ||
+        normalized == 'OOS';
+  }
+
+  bool _isVariantAvailableForListing(WardrobeItem item, ProductVariant? variant) {
+    if (item.variants.isNotEmpty) {
+      final availableVariants = item.variants.where(
+        (v) => !_isOutOfStockStatus(v.stockStatus) && v.stockOnHand > 0,
+      ).length;
+      final hasAvailableVariant = availableVariants > 0;
+      final isProductOutOfStock = !hasAvailableVariant;
+      
+      if (kDebugMode) {
+        debugPrint('[PRODUCT_LIST_STOCK]');
+        debugPrint('productId=${item.productId}');
+        debugPrint('totalVariants=${item.variants.length}');
+        debugPrint('availableVariants=$availableVariants');
+        debugPrint('unavailableVariants=${item.variants.length - availableVariants}');
+        debugPrint('isProductOutOfStock=$isProductOutOfStock');
+      }
+      
+      return hasAvailableVariant;
+    }
+    if (_isOutOfStockStatus(item.stockStatus)) {
+      return false;
+    }
+    return true;
   }
 
 
@@ -607,7 +540,26 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
+    final isKidsOrEssentials = isKidsCategory(widget.category) ||
+        isEssentialCategory(widget.category) ||
+        widget.category.toLowerCase().contains('kid') ||
+        widget.category.toLowerCase().contains('essential');
+
+    return BlocListener<CartBloc, CartState>(
+      listenWhen: (prev, curr) =>
+          curr.errorMessage != null &&
+          curr.errorMessage != prev.errorMessage &&
+          isSubscriptionQuotaError(curr.errorMessage),
+      listener: (context, state) {
+        _showSubscriptionQuotaDialog(context, state.errorMessage!);
+      },
+      child: PopScope(
+        canPop: isKidsOrEssentials,
+        onPopInvokedWithResult: (didPop, result) {
+          if (didPop) return;
+          Navigator.popUntil(context, ModalRoute.withName(AppRoutes.homeScreen));
+        },
+        child: Scaffold(
       backgroundColor: const Color(0xFF0D0D0D),
       body: SafeArea(
         child: Column(
@@ -701,6 +653,8 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
           ],
         ),
       ),
+    ),
+    ),
     );
   }
 
@@ -725,18 +679,30 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
     return widget.category.replaceAll(' Wardrobe', ' Wear');
   }
 
-  // ── App bar ─────────────────────────────────────────────────────
   Widget _buildAppBar() {
+    final isKidsOrEssentials = isKidsCategory(widget.category) ||
+        isEssentialCategory(widget.category) ||
+        widget.category.toLowerCase().contains('kid') ||
+        widget.category.toLowerCase().contains('essential');
+
     return Padding(
       padding: EdgeInsets.symmetric(horizontal: 16.w, vertical: 14.h),
       child: Row(
         children: [
           GestureDetector(
-            onTap: () => Navigator.pop(context),
-
-              child: Icon(Icons.arrow_back,
-                  color: AppColours.primary, size: 28),
+            onTap: () {
+              if (isKidsOrEssentials) {
+                Navigator.pop(context);
+              } else {
+                Navigator.popUntil(context, ModalRoute.withName(AppRoutes.homeScreen));
+              }
+            },
+            child: Icon(
+              Icons.arrow_back,
+              color: AppColours.primary,
+              size: 28,
             ),
+          ),
           Expanded(
             child: Text(
               _screenTitle,
@@ -749,7 +715,6 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
               ),
             ),
           ),
-          // ❤️ Favorites icon
           GestureDetector(
             onTap: () => Navigator.pushNamed(context, AppRoutes.favoritesScreen),
             child: Container(
@@ -819,7 +784,6 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
     );
   }
 
-  // ── Search bar ───────────────────────────────────────────────────
   Widget _buildSearchBar() {
     return Padding(
       padding: EdgeInsets.fromLTRB(16.w, 0, 16.w, 12.h),
@@ -868,7 +832,45 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
     );
   }
 
-  // ── Product card ─────────────────────────────────────────────────
+  Widget _buildPriceRow(ResolvedPrice prices) {
+    if (prices.hasDiscount) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: [
+          Text(
+            prices.discountedPrice,
+            style: TextStyle(
+              color: AppColours.primary,
+              fontSize: 14.fSize,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          SizedBox(width: 6.w),
+          Text(
+            prices.actualPrice,
+            style: TextStyle(
+              color: Colors.white54,
+              fontSize: 12.fSize,
+              decoration: TextDecoration.lineThrough,
+              decorationColor: Colors.white54,
+            ),
+          ),
+        ],
+      );
+    } else {
+      return Text(
+        prices.discountedPrice,
+        style: TextStyle(
+          color: AppColours.primary,
+          fontSize: 14.fSize,
+          fontWeight: FontWeight.bold,
+        ),
+      );
+    }
+  }
+
   Widget _buildProductCard({
     required WardrobeItem item,
     required int index,
@@ -1012,21 +1014,129 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
                 fontSize: 11.fSize,
               ),
             ),
+            SizedBox(height: 4.h),
+            _buildPriceRow(ProductMapper.resolvePrice(item, variant: _defaultVariantForItem(item))),
             SizedBox(height: 8.h),
             BlocBuilder<CartBloc, CartState>(
+              buildWhen: (previous, current) {
+                final variant = _defaultVariantForItem(item);
+                final productId = item.productId ?? item.favoriteId;
+                final itemType =
+                    CartLimits.cartItemTypeForListing(itemType: item.itemType);
+                final variantId =
+                    isApiUuid(variant?.id) ? variant!.id : null;
+                return previous.quantityForListingCard(
+                          productId: productId,
+                          variantId: variantId,
+                          itemType: itemType,
+                        ) !=
+                        current.quantityForListingCard(
+                          productId: productId,
+                          variantId: variantId,
+                          itemType: itemType,
+                        ) ||
+                    previous.isProductPending(
+                          productId: productId,
+                          variantId: variantId,
+                          itemType: itemType,
+                        ) !=
+                        current.isProductPending(
+                          productId: productId,
+                          variantId: variantId,
+                          itemType: itemType,
+                        ) ||
+                    previous.isVariantOutOfStock(
+                          productId: productId,
+                          variantId: variantId,
+                          itemType: itemType,
+                        ) !=
+                        current.isVariantOutOfStock(
+                          productId: productId,
+                          variantId: variantId,
+                          itemType: itemType,
+                        );
+              },
               builder: (context, cartState) {
                 final variant = _defaultVariantForItem(item);
                 final productId = item.productId ?? item.favoriteId;
                 final fallbackItemId = _cartItemIdFor(item, variant);
-                final existingLine = cartState.lineForProduct(
-                  productId,
-                  variantId: isApiUuid(variant?.id) ? variant!.id : null,
+                final itemType =
+                    CartLimits.cartItemTypeForListing(itemType: item.itemType);
+                final variantId =
+                    isApiUuid(variant?.id) ? variant!.id : null;
+                final existingLine = cartState.lineForListingCard(
+                  productId: productId,
+                  variantId: variantId,
+                  itemType: itemType,
                 );
                 final itemId = existingLine?.id ?? fallbackItemId;
-                final qty = cartState.quantityForProduct(
-                  productId,
-                  variantId: isApiUuid(variant?.id) ? variant!.id : null,
+                final qty = cartState.quantityForListingCard(
+                  productId: productId,
+                  variantId: variantId,
+                  itemType: itemType,
                 );
+                final pending = cartState.isProductPending(
+                  productId: productId,
+                  variantId: variantId,
+                  itemType: itemType,
+                );
+                final outOfStockFromCart = cartState.isVariantOutOfStock(
+                  productId: productId,
+                  variantId: variantId,
+                  itemType: itemType,
+                );
+                final outOfStockFromProduct =
+                    !_isVariantAvailableForListing(item, variant);
+                final outOfStock = outOfStockFromProduct || outOfStockFromCart;
+                final buttonState = qty > 0
+                    ? 'QTY'
+                    : pending
+                        ? 'LOADING'
+                        : outOfStock
+                            ? 'OUT_OF_STOCK'
+                            : 'ADD_TO_CART';
+                if (kDebugMode) {
+                  debugPrint('[STOCK_DEBUG]');
+                  debugPrint('productId=$productId');
+                  debugPrint('variantId=${variantId ?? '-'}');
+                  debugPrint('size=${_selectedSizeForItem(item, variant)}');
+                  debugPrint('stockQuantity=${variant?.stockOnHand}');
+                  debugPrint(
+                    'isAvailable=${_isVariantAvailableForListing(item, variant)}',
+                  );
+                  debugPrint('buttonState=$buttonState');
+                }
+
+                if (outOfStock && qty <= 0) {
+                  return SizedBox(
+                    width: double.maxFinite,
+                    height: 32.h,
+                    child: ElevatedButton(
+                      onPressed: null,
+                      style: ElevatedButton.styleFrom(
+                        elevation: 0,
+                        disabledBackgroundColor: const Color(0xFF2A2A2A),
+                        disabledForegroundColor: Colors.white38,
+                        padding: EdgeInsets.zero,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          side: BorderSide(
+                            color: Colors.white.withOpacity(0.12),
+                            width: 1,
+                          ),
+                        ),
+                      ),
+                      child: Text(
+                        'Out of Stock',
+                        style: TextStyle(
+                          color: Colors.white38,
+                          fontSize: 12.fSize,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  );
+                }
 
                 if (qty > 0) {
                   return Container(
@@ -1056,33 +1166,70 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
                         Expanded(
                           flex: 2,
                           child: Center(
-                            child: Text(
-                              '$qty',
-                              style: TextStyle(
-                                color: AppColours.primary,
-                                fontSize: 12.fSize,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
+                            child: pending
+                                ? SizedBox(
+                                    width: 14.fSize,
+                                    height: 14.fSize,
+                                    child: const CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Color(0xFFE6C27A),
+                                    ),
+                                  )
+                                : Text(
+                                    '$qty',
+                                    style: TextStyle(
+                                      color: AppColours.primary,
+                                      fontSize: 12.fSize,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
                           ),
                         ),
                         Container(width: 1, color: const Color(0xFFE6C27A).withOpacity(0.35)),
                         Expanded(
                           child: InkWell(
                             borderRadius: const BorderRadius.horizontal(right: Radius.circular(12)),
-                            onTap: () {
+                            onTap: () async {
+                              final itemType =
+                                  CartLimits.cartItemTypeForListing(
+                                      itemType: item.itemType);
+                              
+                              ProductVariant? selectedVariant = variant;
+                              String? finalSize = existingLine?.selectedSize ?? _selectedSizeForItem(item, variant);
+                              
+                              final product = ProductCache.instance.findById(item.productId ?? '');
+                              if (product != null && (product.hasVariants || product.variants.isNotEmpty)) {
+                                final result = await VariantSelectionSheet.show(context, product);
+                                if (result == null) return;
+                                selectedVariant = result;
+                                finalSize = ProductMapper.optionValue(result, 'Size');
+                              }
+
+                              final isKids = itemType == 'kids' ||
+                                  isKidsCategory(widget.category) ||
+                                  isKidsCategory(item.category);
+                              final isEssential = isKids ||
+                                  itemType == 'essentials' ||
+                                  isEssentialCategory(widget.category) ||
+                                  isEssentialCategory(item.category);
+                              final effectiveItemType = isKids
+                                  ? 'kids'
+                                  : (isEssential ? 'essentials' : itemType);
+
+                              final prices = ProductMapper.resolvePrice(item, variant: selectedVariant);
                               final cartItem = CartItem(
                                 id: itemId,
                                 productId: productId,
-                                variantId: existingLine?.variantId ??
-                                    (isApiUuid(variant?.id) ? variant!.id : null),
+                                variantId: isApiUuid(selectedVariant?.id) ? selectedVariant!.id : null,
                                 title: item.title,
                                 imageUrl: item.imageUrl,
-                                price: item.price,
-                                selectedSize: existingLine?.selectedSize ??
-                                    _selectedSizeForItem(item, variant),
-                                quantity: existingLine?.quantity ?? qty,
-                                isEssential: isEssentialCategory(widget.category),
+                                price: prices.discountedPrice,
+                                selectedSize: finalSize ?? '',
+                                quantity: 1,
+                                isEssential: isEssential,
+                                isKids: isKids,
+                                isSubscriptionGarment: !isEssential && effectiveItemType == 'subscription',
+                                itemType: effectiveItemType,
                                 category: widget.category,
                               );
                               final added = tryAddToCart(context, cartItem);
@@ -1100,7 +1247,9 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
                   width: double.maxFinite,
                   height: 32.h,
                   child: ElevatedButton(
-                    onPressed: () {
+                    onPressed: pending
+                        ? null
+                        : () async {
                       if (!isApiUuid(item.productId)) {
                         ScaffoldMessenger.of(context).clearSnackBars();
                         ScaffoldMessenger.of(context).showSnackBar(
@@ -1113,15 +1262,44 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
                         return;
                       }
 
+                      final itemType =
+                          CartLimits.cartItemTypeForListing(itemType: item.itemType);
+                          
+                      ProductVariant? selectedVariant = variant;
+                      String? finalSize = _selectedSizeForItem(item, variant);
+
+                      final product = ProductCache.instance.findById(item.productId ?? '');
+                      if (product != null && (product.hasVariants || product.variants.isNotEmpty)) {
+                        final result = await VariantSelectionSheet.show(context, product);
+                        if (result == null) return; // User closed sheet
+                        selectedVariant = result;
+                        finalSize = ProductMapper.optionValue(result, 'Size');
+                      }
+
+                      final isKids = itemType == 'kids' ||
+                          isKidsCategory(widget.category) ||
+                          isKidsCategory(item.category);
+                      final isEssential = isKids ||
+                          itemType == 'essentials' ||
+                          isEssentialCategory(widget.category) ||
+                          isEssentialCategory(item.category);
+                      final effectiveItemType = isKids
+                          ? 'kids'
+                          : (isEssential ? 'essentials' : itemType);
+
+                      final prices = ProductMapper.resolvePrice(item, variant: selectedVariant);
                       final cartItem = CartItem(
                         id: itemId,
                         productId: productId,
-                        variantId: isApiUuid(variant?.id) ? variant!.id : null,
+                        variantId: isApiUuid(selectedVariant?.id) ? selectedVariant!.id : null,
                         title: item.title,
                         imageUrl: item.imageUrl,
-                        price: item.price,
-                        selectedSize: _selectedSizeForItem(item, variant),
-                        isEssential: isEssentialCategory(widget.category),
+                        price: prices.discountedPrice,
+                        selectedSize: finalSize ?? '',
+                        isEssential: isEssential,
+                        isKids: isKids,
+                        isSubscriptionGarment: !isEssential && effectiveItemType == 'subscription',
+                        itemType: effectiveItemType,
                         category: widget.category,
                       );
 
@@ -1132,6 +1310,7 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
                       elevation: 0,
                       backgroundColor: Colors.transparent,
                       shadowColor: Colors.transparent,
+                      disabledBackgroundColor: Colors.transparent,
                       padding: EdgeInsets.zero,
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
@@ -1156,14 +1335,23 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
                       child: Container(
                         height: 48.h,
                         alignment: Alignment.center,
-                        child: Text(
-                          "Add to cart",
-                          style: TextStyle(
-                            color: Colors.black,
-                            fontSize: 12.fSize,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
+                        child: pending
+                            ? SizedBox(
+                                width: 16.fSize,
+                                height: 16.fSize,
+                                child: const CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  color: Colors.black,
+                                ),
+                              )
+                            : Text(
+                                "Add to cart",
+                                style: TextStyle(
+                                  color: Colors.black,
+                                  fontSize: 12.fSize,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
                       ),
                     ),
                   ),
@@ -1176,7 +1364,45 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
     );
   }
 
-  // ── Empty state ──────────────────────────────────────────────────
+  void _showSubscriptionQuotaDialog(BuildContext context, String message) {
+    final details = SubscriptionQuotaDetails.parse(message);
+    if (kDebugMode) {
+      debugPrint('[CART_QUOTA] showing subscription limit dialog');
+    }
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1A1D21),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          'Subscription Limit Reached',
+          style: CustomTextStyles.montserratBold.copyWith(
+            fontSize: 18,
+            color: AppColours.primary,
+          ),
+        ),
+        content: Text(
+          details.userFriendlyMessage,
+          style: CustomTextStyles.openSansRegular.copyWith(
+            fontSize: 14,
+            color: Colors.white70,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: Text(
+              'OK',
+              style: CustomTextStyles.openSansSemiBold.copyWith(
+                color: AppColours.primary,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildEmptyState() {
     final noCatalogProducts = _apiItems.isEmpty &&
         _searchQuery.trim().isEmpty &&
@@ -1188,15 +1414,17 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(
-            noCatalogProducts ? Icons.cloud_off : Icons.search_off,
+            _loadFailed ? Icons.cloud_off : Icons.search_off,
             color: AppColours.primary.withOpacity(0.4),
             size: 64,
           ),
           SizedBox(height: 16.h),
           Text(
-            noCatalogProducts
+            _loadFailed
                 ? 'Unable to load products'
-                : 'No items found',
+                : noCatalogProducts
+                    ? 'No products available'
+                    : 'No items found',
             style: TextStyle(color: Colors.white54, fontSize: 16.fSize),
           ),
           if (noCatalogProducts) ...[

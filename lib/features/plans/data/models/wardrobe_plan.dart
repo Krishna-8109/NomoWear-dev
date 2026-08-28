@@ -8,9 +8,11 @@ class WardrobePlan {
   final String? description;
   final int durationDays;
   final int maxGarments;
+  final int noOfBookings;
   final num monthPrice;
   final num yearPrice;
   final num price;
+  final String billingPeriod;
   final List<String> features;
   final int displayOrder;
   final bool isActive;
@@ -25,9 +27,11 @@ class WardrobePlan {
     this.description,
     required this.durationDays,
     required this.maxGarments,
+    required this.noOfBookings,
     required this.monthPrice,
     required this.yearPrice,
     required this.price,
+    this.billingPeriod = '',
     this.features = const [],
     this.displayOrder = 0,
     this.isActive = true,
@@ -61,9 +65,14 @@ class WardrobePlan {
       durationDays: _parseInt(json['durationDays'] ?? json['duration_days']) ?? 0,
       maxGarments:
           _parseInt(json['maxGarments'] ?? json['max_garments']) ?? 0,
+      noOfBookings:
+          _parseInt(json['noOfBookings'] ?? json['no_of_bookings']) ?? 0,
       monthPrice: _parseNum(json['monthPrice'] ?? json['month_price']) ?? 0,
       yearPrice: _parseNum(json['yearPrice'] ?? json['year_price']) ?? 0,
       price: _parseNum(json['price']) ?? 0,
+      billingPeriod: json['billingPeriod']?.toString() ??
+          json['billing_period']?.toString() ??
+          '',
       features: features,
       displayOrder:
           _parseInt(json['displayOrder'] ?? json['display_order']) ?? 0,

@@ -42,10 +42,10 @@ class SplashBloc extends Bloc<SplashEvent, SplashState> {
       if (isLoggedIn) {
         destination = SplashDestination.home;
         try {
-          await _profileRepository.getProfile();
+          await _profileRepository.getProfile(forceRefresh: true);
         } on ApiException catch (e) {
-          if (e.statusCode == 401) {
-            // Invalid token — full local wipe, then Login.
+          if (e.statusCode == 401 || e.statusCode == 403 || e.statusCode == 404) {
+            // Invalid token or session (e.g. account deleted) — full local wipe, then Login.
             await SessionCleanup.clearUserSession();
             destination = SplashDestination.login;
           }

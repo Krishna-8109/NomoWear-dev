@@ -61,16 +61,37 @@ class SubscriptionGarmentBalance {
 
     ActiveSubscription? active;
     try {
+      if (kDebugMode && forceRefresh) {
+        debugPrint('[SUBSCRIPTION_REFRESH] START');
+      }
       active = await subscriptions.getActiveSubscription(
         forceRefresh: forceRefresh,
       );
     } catch (_) {
+      if (forceRefresh) {
+        if (kDebugMode) {
+          debugPrint('[SUBSCRIPTION_SOURCE]');
+          debugPrint('source=unknown');
+          debugPrint('note=backend refresh failed for resolveAndCache');
+          debugPrint('[SUBSCRIPTION_REFRESH] COMPLETE');
+        }
+        // For refresh-critical decisions, do not silently use stale cache.
+        return null;
+      }
       active = SubscriptionCache.instance.activeSubscription;
+      if (kDebugMode) {
+        debugPrint('[SUBSCRIPTION_SOURCE]');
+        debugPrint('source=cache');
+        debugPrint('note=resolveAndCache(forceRefresh=false) fallback');
+      }
     }
 
     if (active == null || !active.isActive) {
       _log('no active subscription — clear remaining cache');
       SubscriptionCache.instance.setRemainingGarmentsBalance(null);
+      if (kDebugMode && forceRefresh) {
+        debugPrint('[SUBSCRIPTION_REFRESH] COMPLETE');
+      }
       return null;
     }
 
@@ -94,6 +115,13 @@ class SubscriptionGarmentBalance {
     if (fromApi != null) {
       _log('using API remaining=$fromApi');
       SubscriptionCache.instance.setRemainingGarmentsBalance(fromApi);
+      if (kDebugMode) {
+        debugPrint('[SUBSCRIPTION_SOURCE]');
+        debugPrint('source=backend');
+      }
+      if (kDebugMode && forceRefresh) {
+        debugPrint('[SUBSCRIPTION_REFRESH] COMPLETE');
+      }
       return fromApi;
     }
 
@@ -102,6 +130,13 @@ class SubscriptionGarmentBalance {
     if (_hasUnusedBookings(active)) {
       _log('unused bookings — remaining=full max=$max');
       SubscriptionCache.instance.setRemainingGarmentsBalance(max);
+      if (kDebugMode) {
+        debugPrint('[SUBSCRIPTION_SOURCE]');
+        debugPrint('source=backend');
+      }
+      if (kDebugMode && forceRefresh) {
+        debugPrint('[SUBSCRIPTION_REFRESH] COMPLETE');
+      }
       return max;
     }
 
@@ -110,6 +145,14 @@ class SubscriptionGarmentBalance {
     if (start == null) {
       _log('no period start — remaining=full max=$max (avoid over-count)');
       SubscriptionCache.instance.setRemainingGarmentsBalance(max);
+      if (kDebugMode) {
+        debugPrint('[SUBSCRIPTION_SOURCE]');
+        debugPrint('source=backend');
+        debugPrint('note=missing period start; used backend maxGarments only');
+      }
+      if (kDebugMode && forceRefresh) {
+        debugPrint('[SUBSCRIPTION_REFRESH] COMPLETE');
+      }
       return max;
     }
 
@@ -119,6 +162,14 @@ class SubscriptionGarmentBalance {
     } catch (e) {
       _log('order history failed ($e) — remaining=full max=$max');
       SubscriptionCache.instance.setRemainingGarmentsBalance(max);
+      if (kDebugMode) {
+        debugPrint('[SUBSCRIPTION_SOURCE]');
+        debugPrint('source=backend');
+        debugPrint('note=order history unavailable; used backend maxGarments only');
+      }
+      if (kDebugMode && forceRefresh) {
+        debugPrint('[SUBSCRIPTION_REFRESH] COMPLETE');
+      }
       return max;
     }
 
@@ -126,6 +177,13 @@ class SubscriptionGarmentBalance {
     final remaining = (max - used).clamp(0, max);
     _log('from orders used=$used remaining=$remaining (max=$max start=$start)');
     SubscriptionCache.instance.setRemainingGarmentsBalance(remaining);
+    if (kDebugMode) {
+      debugPrint('[SUBSCRIPTION_SOURCE]');
+      debugPrint('source=backend');
+    }
+    if (kDebugMode && forceRefresh) {
+      debugPrint('[SUBSCRIPTION_REFRESH] COMPLETE');
+    }
     return remaining;
   }
 

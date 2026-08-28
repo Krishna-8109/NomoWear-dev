@@ -405,7 +405,18 @@ class _MyAddressesScreenState extends State<MyAddressesScreen> {
                                   ),
                                 ],
                               ),
-                              SizedBox(height: 10,),
+                              if (a.contactName.isNotEmpty) ...[
+                                SizedBox(height: 10.h),
+                                Text(
+                                  a.contactName,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                              SizedBox(height: 10.h),
                               Text(
                                 a.addressLines,
                                 style: CustomTextStyles.montserratRegular.copyWith(fontSize: 14),

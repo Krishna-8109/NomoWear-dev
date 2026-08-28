@@ -1,13 +1,18 @@
 import 'package:dotted_border/dotted_border.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:nomowear/core/app_export.dart';
 import 'package:nomowear/core/network/api_exception.dart';
 import 'package:nomowear/core/services/razorpay_service.dart';
 import 'package:nomowear/features/cart/data/models/remote_cart.dart';
-import 'package:nomowear/features/cart/data/cart_repository.dart';
 import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
+import 'package:nomowear/features/cart/presentation/utils/cart_limits.dart';
+import 'package:nomowear/features/cart/presentation/widgets/cart_quantity_control.dart';
+import 'package:nomowear/features/cart/presentation/widgets/qty_picker_sheet.dart';
 import 'package:nomowear/features/checkout/data/checkout_session.dart';
+import 'package:nomowear/features/checkout/data/subscription_kit_preferences.dart';
+import 'package:nomowear/features/checkout/presentation/utils/checkout_initiate_request.dart';
 import 'package:nomowear/features/checkout/presentation/utils/checkout_pricing.dart';
 import 'package:nomowear/features/checkout/presentation/utils/subscription_booking_eligibility.dart';
 import 'package:nomowear/features/orders/data/models/initiate_order_result.dart';
@@ -17,8 +22,19 @@ import 'package:nomowear/features/profile/data/profile_cache.dart';
 import 'package:nomowear/features/profile/data/profile_repository.dart';
 import 'package:nomowear/features/profile/domain/user_order.dart';
 import 'package:nomowear/features/profile/presentation/utils/profile_order_guard.dart';
+import 'package:nomowear/features/checkout/data/wardrobe_booking_session.dart';
+import 'package:nomowear/features/products/data/models/product_variant.dart';
+import 'package:nomowear/features/products/data/product_cache.dart';
+import 'package:nomowear/features/products/data/product_mapper.dart';
+import 'package:nomowear/features/wardrobe/presentation/widgets/variant_selection_sheet.dart';
+import 'package:nomowear/features/cart/presentation/widgets/reusable_product_cart_item.dart';
+import 'package:nomowear/features/products/data/models/product_variant.dart';
+import 'package:nomowear/features/products/data/product_cache.dart';
+import 'package:nomowear/features/products/data/product_mapper.dart';
+import 'package:nomowear/features/wardrobe/presentation/widgets/variant_selection_sheet.dart';
 import 'package:nomowear/features/subscriptions/data/subscription_garment_balance.dart';
 import 'package:nomowear/features/subscriptions/data/subscription_repository.dart';
+import 'package:nomowear/features/subscriptions/data/subscription_cache.dart';
 import 'package:razorpay_flutter/razorpay_flutter.dart';
 
 class EssentialsCheckoutScreen extends StatefulWidget {
@@ -39,7 +55,6 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
   final OrderRepository _orderRepository = OrderRepository();
   final SubscriptionRepository _subscriptionRepository =
       SubscriptionRepository();
-  final CartRepository _cartRepository = CartRepository();
   final RazorpayService _razorpayService = RazorpayService();
 
   bool _isPlacingOrder = false;
@@ -53,7 +68,7 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
   Future<void>? _payableLoadFuture;
 
   static const List<String> _allSizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
-  static const List<int> _qtyOptions = [1, 2, 3, 4, 5];
+  static const int _essentialsMaxQty = 5;
 
   @override
   void initState() {
@@ -69,7 +84,9 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
       if (!mounted) return;
       final state = context.read<CartBloc>().state;
       if (state.isEmpty) {
-        context.read<CartBloc>().add(LoadCartEvent());
+        context.read<CartBloc>().add(
+              LoadCartEvent(source: 'EssentialsCheckout.initState'),
+            );
         return;
       }
       final fp = CheckoutPricing.cartFingerprint(state);
@@ -156,7 +173,11 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
   void _finishOrderSuccess(
     String orderId, {
     String? orderNumber,
+    bool wasSubscriptionBooking = false,
   }) async {
+    if (kDebugMode) {
+      debugPrint('[PAYMENT_FLOW] PAYMENT_SUCCESS');
+    }
     var displayNumber = orderNumber?.trim() ?? '';
     if (displayNumber.isEmpty) {
       try {
@@ -170,15 +191,78 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
     }
     if (displayNumber.isEmpty) displayNumber = orderId;
 
+    if (wasSubscriptionBooking) {
+      await SubscriptionKitPreferences.instance
+          .markFirstSubscriptionBookingCompleted();
+    }
+
+    if (!mounted) return;
+    final completedBookingGarments =
+        context.read<CartBloc>().state.currentBookingSelectedGarments;
+    if (kDebugMode) {
+      debugPrint(
+        '[PAYMENT_SUCCESS] completedBookingGarments=$completedBookingGarments',
+      );
+    }
+
+    await WardrobeBookingSession.instance.markPaymentCompleted();
+    await WardrobeBookingSession.instance.startNewBooking();
+
     if (!mounted) return;
     OrdersCache.instance.clear();
     userOrdersList.clear();
-    CheckoutSession.instance.clear();
-    // Refresh remaining garments after a completed subscription booking so the
-    // next booking uses the updated balance (API or order-history fallback).
-    // ignore: unawaited_futures
-    SubscriptionGarmentBalance.resolveAndCache(forceRefresh: true);
-    context.read<CartBloc>().add(ClearCartEvent());
+    CheckoutSession.instance.clearDeliveryDetails();
+    CheckoutSession.instance.clearWardrobeCategoryLock();
+    // Reset temporary booking-mode flags so the next Home visit shows fresh
+    // subscription options instead of locking into the previous flow.
+    CheckoutSession.instance.clearBookingModeSelection();
+    if (kDebugMode) {
+      debugPrint(
+        '[SUBSCRIPTION_FLOW] paymentSuccess=true '
+        'continueWithoutMembership=${CheckoutSession.instance.continueWithoutMembership} '
+        'useSubscriptionBooking=${CheckoutSession.instance.useSubscriptionBooking} '
+        'bookingMode=${CheckoutSession.instance.bookingMode.name} '
+        'wardrobeSessionPath=${WardrobeBookingSession.instance.selectedPath.name}',
+      );
+    }
+    final remaining =
+        await SubscriptionGarmentBalance.resolveAndCache(forceRefresh: true);
+    final active = SubscriptionCache.instance.activeSubscription;
+    if (kDebugMode) {
+      debugPrint(
+        '[PAYMENT_SUCCESS] booking completed '
+        'subscription remaining garments=$remaining '
+        'totalBookings=${active?.noOfBookings} '
+        'usedBookings=${active?.bookingsUsed} '
+        'remainingBookings=${active?.remainingBookings} '
+        'booking session closed',
+      );
+    }
+    if (!mounted) return;
+
+    // Refresh cart from backend (which should now be empty after payment)
+    // instead of sending individual DELETE requests for each item.
+    if (kDebugMode) {
+      debugPrint('[CART_AFTER_PAYMENT] REFRESH_START');
+    }
+    try {
+      final remote =
+          await context.read<CartBloc>().refresh(source: 'payment_success');
+      if (kDebugMode) {
+        debugPrint(
+          '[CART_AFTER_PAYMENT] REFRESH_COMPLETE item_count=${remote.items.length}',
+        );
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[CART_AFTER_PAYMENT] REFRESH_ERROR $e');
+      }
+    }
+
+    if (!mounted) return;
+    if (kDebugMode) {
+      debugPrint('[PAYMENT_FLOW] NAVIGATING_TO_ORDER_SUCCESS');
+    }
     Navigator.pushReplacementNamed(
       context,
       AppRoutes.orderSuccessScreen,
@@ -189,10 +273,13 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
     );
   }
 
+  /// Pure subscription wardrobe booking — no paid rental or purchase lines.
   bool _isSubscriptionWardrobeBooking(CartState state) {
-    if (state.wardrobeItems.isEmpty || state.essentialItems.isNotEmpty) {
-      return false;
-    }
+    if (state.wardrobeItems.isEmpty) return false;
+    if (state.essentialItems.isNotEmpty) return false;
+    if (state.hasPaidRentalGarments) return false;
+    if (state.hasMixedWardrobeTypes) return false;
+    if (CheckoutSession.instance.continueWithoutMembership) return false;
     return CheckoutSession.instance.useSubscriptionBooking;
   }
 
@@ -220,10 +307,8 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
       return;
     }
 
-    // Show updated totals immediately from local qty × price while server reloads.
     if (mounted) {
       setState(() {
-        _applyOptimisticPayableSummary(state, fingerprint);
         _isLoadingPayable = true;
         _payableError = null;
       });
@@ -243,7 +328,6 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
       fingerprint = latestFp;
       if (mounted) {
         setState(() {
-          _applyOptimisticPayableSummary(state, fingerprint);
           _isLoadingPayable = true;
           _payableError = null;
         });
@@ -258,47 +342,14 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
     }
   }
 
-  void _applyOptimisticPayableSummary(CartState state, String fingerprint) {
-    final summary = CheckoutPricing.fromLocalCartLines(state);
-    final previous = _payableSnapshot;
-    if (previous != null) {
-      _payableSnapshot = CheckoutPayableSnapshot(
-        remoteCart: previous.remoteCart,
-        initiate: previous.initiate,
-        summary: summary,
-        gatewayAmountPaise: summary.total * 100,
-        displayTotalRupees: summary.total,
-      );
-    } else {
-      // Keep summary visible while the first authoritative load is in flight.
-      _payableSnapshot = CheckoutPayableSnapshot(
-        remoteCart: const RemoteCart(id: '', items: []),
-        initiate: const InitiateOrderResult(
-          orderId: '',
-          status: '',
-          amount: 0,
-        ),
-        summary: summary,
-        gatewayAmountPaise: summary.total * 100,
-        displayTotalRupees: summary.total,
-      );
-    }
-    _payableCartFingerprint = fingerprint;
-  }
-
   /// Syncs cart with backend, initiates order once, stores payable for UI + Razorpay.
   Future<void> _fetchAuthoritativePayable(
     CartState state,
     String fingerprint,
   ) async {
     try {
-      // Flush local qty/size mutations before reading server cart totals.
-      // Otherwise getCart() can return stale lines and Order Summary freezes.
-      final syncedCart = state.items.isEmpty
-          ? const RemoteCart(id: '', items: [])
-          : await _cartRepository.syncCartState(state);
       final remoteCart =
-          syncedCart.isEmpty ? await _cartRepository.getCart() : syncedCart;
+          await context.read<CartBloc>().refresh(source: 'EssentialsCheckout.ensure');
       final initiate = await _initiateCheckoutOrder(state);
       if (!mounted) return;
 
@@ -307,7 +358,6 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
       final latestFp = CheckoutPricing.cartFingerprint(latest);
       if (latestFp != fingerprint) {
         setState(() {
-          _applyOptimisticPayableSummary(latest, latestFp);
           _isLoadingPayable = true;
         });
         await _fetchAuthoritativePayable(latest, latestFp);
@@ -354,17 +404,12 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
   }
 
   Future<InitiateOrderResult> _initiateCheckoutOrder(CartState state) async {
-    final hasWardrobe = state.wardrobeItems.isNotEmpty;
-    final hasEssentials = state.essentialItems.isNotEmpty;
-    final checkoutType = hasWardrobe ? 'kit' : 'essentials';
-
+    final req = CheckoutInitiateRequest.fromCart(state);
     return _orderRepository.initiateOrder(
-      checkoutType: checkoutType,
-      nonSubscription: true,
-      productClass: hasEssentials ? 'single_item' : 'wardrobe_kit',
-      wardrobeKitId: hasWardrobe
-          ? (state.wardrobeKitProductId ?? state.wardrobeKitId)
-          : null,
+      checkoutType: req.checkoutType,
+      nonSubscription: req.nonSubscription,
+      productClass: req.productClass,
+      wardrobeKitId: req.wardrobeKitId,
     );
   }
 
@@ -378,8 +423,6 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
         _payableSnapshot!.initiate.canOpenRazorpay;
   }
 
-  /// Order Summary for the current cart. When qty/size changed, show live local
-  /// totals immediately even before the initiate-order snapshot catches up.
   OrderSummary? _displaySummary(CartState state) {
     if (_isSubscriptionWardrobeBooking(state)) return null;
 
@@ -388,7 +431,23 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
     if (snapshot != null && _payableCartFingerprint == fp) {
       return snapshot.summary;
     }
-    return CheckoutPricing.fromLocalCartLines(state);
+    if (state.remote.totalAmount > 0 || state.remote.subtotal > 0) {
+      final sub = state.remote.subtotal.round();
+      final del = state.remote.deliveryCharge.round();
+      final disc = state.remote.discountAmount.round();
+      final gst = state.remote.taxAmount.round();
+      final tot = state.remote.totalAmount.round();
+      return OrderSummary(
+        subtotal: sub,
+        deliveryFee: del,
+        discountAmount: disc,
+        gst: gst,
+        total: tot > 0 ? tot : (sub + del + gst - disc),
+        wardrobeKitAmount: 0,
+        essentialsAmount: 0,
+      );
+    }
+    return snapshot?.summary;
   }
 
   Future<void> _placeOrder(CartState state) async {
@@ -452,11 +511,33 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
 
         if (!mounted) return;
 
+        if (bookingResult.canOpenRazorpay) {
+          final remoteCart = await context
+              .read<CartBloc>()
+              .refresh(source: 'EssentialsCheckout.subscriptionBooking');
+          if (!mounted) return;
+          final snapshot = CheckoutPricing.payableSnapshot(
+            remoteCart: remoteCart,
+            initiate: bookingResult,
+            cartState: state,
+          );
+          setState(() {
+            _payableSnapshot = snapshot;
+            _payableCartFingerprint = CheckoutPricing.cartFingerprint(state);
+            _isPlacingOrder = false;
+          });
+          await _openRazorpayForSnapshot(snapshot, state);
+          return;
+        }
+
         if (bookingResult.orderId.isNotEmpty &&
-            (bookingResult.isConfirmed || !bookingResult.requiresPayment)) {
+            (bookingResult.isFreeSubscriptionBooking ||
+                bookingResult.isConfirmed ||
+                !bookingResult.requiresPayment)) {
           _finishOrderSuccess(
             bookingResult.orderId,
             orderNumber: bookingResult.orderNumber,
+            wasSubscriptionBooking: true,
           );
           return;
         }
@@ -466,7 +547,7 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
           SnackBar(
             content: Text(
               bookingResult.requiresPayment
-                  ? 'Subscription booking could not be confirmed. Please try again.'
+                  ? 'Payment details missing from server. Please try again.'
                   : 'Unable to confirm wardrobe booking. Please try again.',
             ),
           ),
@@ -497,32 +578,8 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
         return;
       }
 
-      final result = snapshot.initiate;
-
-      var customer = ProfileCache.instance.customer;
-      if (customer == null) {
-        try {
-          customer = await ProfileRepository().getProfile();
-        } catch (_) {
-          customer = null;
-        }
-      }
-
       setState(() => _isPlacingOrder = false);
-
-      // Gateway amount is identical to Payment Summary grand total source.
-      _razorpayService.openCheckout(
-        keyId: result.razorpayKeyId!,
-        orderId: result.razorpayOrderId!,
-        amount: snapshot.gatewayAmountPaise,
-        currency: result.currency,
-        name: customer?.fullName,
-        email: customer?.email,
-        contact: customer?.mobile,
-        description: state.wardrobeItems.isNotEmpty
-            ? 'Nomowear wardrobe kit order'
-            : 'Nomowear essentials order',
-      );
+      await _openRazorpayForSnapshot(snapshot, state);
     } on ApiException catch (e) {
       if (!mounted) return;
       setState(() => _isPlacingOrder = false);
@@ -538,6 +595,34 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
         ),
       );
     }
+  }
+
+  Future<void> _openRazorpayForSnapshot(
+    CheckoutPayableSnapshot snapshot,
+    CartState state,
+  ) async {
+    final result = snapshot.initiate;
+    var customer = ProfileCache.instance.customer;
+    if (customer == null) {
+      try {
+        customer = await ProfileRepository().getProfile();
+      } catch (_) {
+        customer = null;
+      }
+    }
+
+    _razorpayService.openCheckout(
+      keyId: result.razorpayKeyId!,
+      orderId: result.razorpayOrderId!,
+      amount: snapshot.gatewayAmountPaise,
+      currency: result.currency,
+      name: customer?.fullName,
+      email: customer?.email,
+      contact: customer?.mobile,
+      description: state.wardrobeItems.isNotEmpty
+          ? 'Nomowear wardrobe kit order'
+          : 'Nomowear essentials order',
+    );
   }
 
   @override
@@ -612,8 +697,9 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
                               SizedBox(height: 20.h),
                               _buildOrderSummary(
                                 subtotal: summary?.subtotal ?? 0,
-                                gst: summary?.gst ?? 0,
                                 deliveryFee: summary?.deliveryFee ?? 0,
+                                discountAmount: summary?.discountAmount ?? 0,
+                                gst: summary?.gst ?? 0,
                                 total: summary?.total ?? 0,
                                 wardrobeKitAmount: summary?.wardrobeKitAmount ?? 0,
                                 subscriptionBooking: subscriptionBooking,
@@ -698,32 +784,87 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
   }
 
   Widget _buildSelectedGarments(CartState state) {
-    final wardrobeItems = state.groupedWardrobeItems;
-    final essentialItems = state.groupedEssentialItems;
+    final subscriptionItems = state.subscriptionGarmentItems;
+    final paidRentalItems = state.paidRentalGarmentItems;
+    final essentialItems = state.essentialsOnlyItems;
+    final kidsItems = state.kidsItems;
+    final hasWardrobe =
+        subscriptionItems.isNotEmpty || paidRentalItems.isNotEmpty;
+    final hasPurchase = essentialItems.isNotEmpty || kidsItems.isNotEmpty;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (wardrobeItems.isNotEmpty) ...[
-          _buildWardrobeKitSection(state, wardrobeItems),
+        if (subscriptionItems.isNotEmpty) ...[
+          _buildWardrobeKitSection(
+            state,
+            subscriptionItems,
+            sectionTitle: 'SUBSCRIPTION ITEMS',
+            showPrice: false,
+          ),
           SizedBox(height: 20.h),
         ],
-        if (essentialItems.isNotEmpty) ...[
-          if (wardrobeItems.isNotEmpty)
+        if (paidRentalItems.isNotEmpty) ...[
+          if (subscriptionItems.isNotEmpty)
             Divider(
               height: 1,
               color: AppColours.primary,
               thickness: 0.2,
             ),
-          if (wardrobeItems.isNotEmpty) SizedBox(height: 20.h),
-          _buildSectionHeader(
-            'SELECTED ESSENTIALS',
-            '${essentialItems.length} Item${essentialItems.length == 1 ? '' : 's'}',
+          if (subscriptionItems.isNotEmpty) SizedBox(height: 20.h),
+          _buildWardrobeKitSection(
+            state,
+            paidRentalItems,
+            sectionTitle: 'NON-SUBSCRIPTION ITEMS',
+            showPrice: true,
           ),
-          SizedBox(height: 10.h),
-          ...essentialItems.map((item) => _buildSelectedItemCard(item, showPrice: true)),
+          SizedBox(height: 20.h),
         ],
         if (essentialItems.isNotEmpty) ...[
+          if (hasWardrobe)
+            Divider(
+              height: 1,
+              color: AppColours.primary,
+              thickness: 0.2,
+            ),
+          if (hasWardrobe) SizedBox(height: 20.h),
+          _buildSectionHeader(
+            'ESSENTIALS',
+            '${essentialItems.fold<int>(0, (s, i) => s + i.quantity)} Item${essentialItems.length == 1 ? '' : 's'}',
+            isNonReturnable: true,
+          ),
+          SizedBox(height: 10.h),
+          ...essentialItems.map(
+            (item) => _buildSelectedItemCard(
+              item,
+              state: state,
+              showPrice: true,
+            ),
+          ),
+        ],
+        if (kidsItems.isNotEmpty) ...[
+          if (hasWardrobe || essentialItems.isNotEmpty)
+            Divider(
+              height: 1,
+              color: AppColours.primary,
+              thickness: 0.2,
+            ),
+          if (hasWardrobe || essentialItems.isNotEmpty) SizedBox(height: 20.h),
+          _buildSectionHeader(
+            'KIDS',
+            '${kidsItems.fold<int>(0, (s, i) => s + i.quantity)} Item${kidsItems.length == 1 ? '' : 's'}',
+            isNonReturnable: true,
+          ),
+          SizedBox(height: 10.h),
+          ...kidsItems.map(
+            (item) => _buildSelectedItemCard(
+              item,
+              state: state,
+              showPrice: true,
+            ),
+          ),
+        ],
+        if (hasPurchase) ...[
           SizedBox(height: 20.h),
           Divider(
             height: 1,
@@ -735,17 +876,49 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
     );
   }
 
+  Widget _buildCheckoutGarmentList(
+    CartState state,
+    List<CartItem> items, {
+    required String title,
+    required bool showPrice,
+  }) {
+    final garmentCount =
+        items.fold<int>(0, (sum, item) => sum + item.quantity);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionHeader(
+          title,
+          '$garmentCount Item${garmentCount == 1 ? '' : 's'}',
+        ),
+        SizedBox(height: 10.h),
+        ...items.map(
+          (item) => _buildSelectedItemCard(
+            item,
+            state: state,
+            showPrice: showPrice,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildWardrobeKitSection(
     CartState state,
-    List<CartItem> wardrobeItems,
-  ) {
+    List<CartItem> wardrobeItems, {
+    String sectionTitle = 'SUBSCRIPTION ITEMS',
+    bool showPrice = false,
+  }) {
     final garmentCount =
         wardrobeItems.fold<int>(0, (sum, item) => sum + item.quantity);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildSectionHeader('SELECTED WARDROBE', '1 Item'),
+        _buildSectionHeader(
+          sectionTitle,
+          '$garmentCount Item${garmentCount == 1 ? '' : 's'}',
+        ),
         SizedBox(height: 16.h),
         _buildWardrobeKitSummaryCard(
           state: state,
@@ -756,13 +929,14 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
           SizedBox(height: 24.h),
           _buildSectionHeader(
             'SELECTED GARMENTS',
-            '${wardrobeItems.length} Item${wardrobeItems.length == 1 ? '' : 's'}',
+            '$garmentCount Item${garmentCount == 1 ? '' : 's'}',
           ),
           SizedBox(height: 10.h),
           ...wardrobeItems.map(
             (item) => _buildSelectedItemCard(
               item,
-              showPrice: !CheckoutSession.instance.useSubscriptionBooking,
+              state: state,
+              showPrice: showPrice || !item.isSubscriptionGarment,
             ),
           ),
         ],
@@ -828,9 +1002,7 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
         .take(4)
         .toList();
     while (images.length < 4) {
-      images.add(
-        images.isNotEmpty ? images.last : ImageConstant.comfortWearImg1,
-      );
+      images.add(images.isNotEmpty ? images.last : '');
     }
 
     Widget cell(String url, {BorderRadius? radius}) {
@@ -845,72 +1017,95 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
       );
     }
 
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        width: 88.w,
-        height: 88.w,
-        child: Column(
-          children: [
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: cell(
-                      images[0],
-                      radius: const BorderRadius.only(topLeft: Radius.circular(8)),
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: AppColours.primary,
+          width: 1.2,
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(9),
+        child: SizedBox(
+          width: 88.w,
+          height: 88.w,
+          child: Column(
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: cell(
+                        images[0],
+                        radius: const BorderRadius.only(topLeft: Radius.circular(8)),
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 2),
-                  Expanded(
-                    child: cell(
-                      images[1],
-                      radius: const BorderRadius.only(topRight: Radius.circular(8)),
+                    const SizedBox(width: 2),
+                    Expanded(
+                      child: cell(
+                        images[1],
+                        radius: const BorderRadius.only(topRight: Radius.circular(8)),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            const SizedBox(height: 2),
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: cell(
-                      images[2],
-                      radius:
-                          const BorderRadius.only(bottomLeft: Radius.circular(8)),
+              const SizedBox(height: 2),
+              Expanded(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: cell(
+                        images[2],
+                        radius:
+                            const BorderRadius.only(bottomLeft: Radius.circular(8)),
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 2),
-                  Expanded(
-                    child: cell(
-                      images[3],
-                      radius:
-                          const BorderRadius.only(bottomRight: Radius.circular(8)),
+                    const SizedBox(width: 2),
+                    Expanded(
+                      child: cell(
+                        images[3],
+                        radius:
+                            const BorderRadius.only(bottomRight: Radius.circular(8)),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
   }
 
 
-  Widget _buildSectionHeader(String title, String count) {
+  Widget _buildSectionHeader(
+    String title,
+    String count, {
+    bool isNonReturnable = false,
+  }) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Text(
-          title,
-          style: CustomTextStyles.montserratBold.copyWith(
-            fontSize: 12,
-            color: AppColours.primary,
-            letterSpacing: 1,
-          ),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              title,
+              style: CustomTextStyles.montserratBold.copyWith(
+                fontSize: 12,
+                color: AppColours.primary,
+                letterSpacing: 1,
+              ),
+            ),
+            if (isNonReturnable) ...[
+              SizedBox(width: 8.w),
+              _buildNonReturnableBadge(),
+            ],
+          ],
         ),
         Text(
           count,
@@ -920,95 +1115,52 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
     );
   }
 
-  Widget _buildSelectedItemCard(CartItem item, {required bool showPrice}) {
+  Widget _buildNonReturnableBadge() {
     return Container(
-      margin: EdgeInsets.only(bottom: 10.h),
+      padding: EdgeInsets.symmetric(horizontal: 8.w, vertical: 3.h),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEA4335).withOpacity(0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: const Color(0xFFEA4335).withOpacity(0.6),
+          width: 1,
+        ),
+      ),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(4),
-            child: ProductImage(
-              imageUrl: item.imageUrl,
-              width: 44.w,
-              height: 52.h,
-              fit: BoxFit.cover,
-            ),
+          Icon(
+            Icons.replay_rounded,
+            color: const Color(0xFFEA4335),
+            size: 11.w,
           ),
-          SizedBox(width: 10.w),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  item.title,
-                  style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 14,color: AppColours.primary),
-                ),
-                if (showPrice) ...[
-                  SizedBox(height: 2.h),
-                  Text(
-                    CheckoutPricing.formatMoney(
-                      CheckoutPricing.parseItemPrice(
-                            item.price,
-                            isEssential: item.isEssential,
-                          ) *
-                          item.quantity,
-                    ),
-                    style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 12,color: AppColours.primary),
-                  ),
-                ],
-                SizedBox(height: 4.h),
-                Row(
-                  children: [
-                    _buildDropdownChip(
-                      value: item.selectedSize,
-                      items: {
-                        ...?(_allSizes),
-                        item.selectedSize,
-                      }.toList(),
-                      prefix: 'Size: ',
-                      onChanged: (val) {
-                        if (val != null) {
-                          context
-                              .read<CartBloc>()
-                              .add(UpdateCartItemSizeEvent(item.id, val));
-                        }
-                      },
-                    ),
-                    SizedBox(width: 10.w),
-                    _buildDropdownChip<int>(
-                      value: item.quantity,
-                      items: {
-                        ..._qtyOptions,
-                        item.quantity,
-                      }.toList()
-                        ..sort(),
-                      prefix: 'Qty: ',
-                      onChanged: (val) {
-                        if (val != null) {
-                          context
-                              .read<CartBloc>()
-                              .add(UpdateCartItemQuantityEvent(item.id, val));
-                        }
-                      },
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          GestureDetector(
-            onTap: () =>
-                context.read<CartBloc>().add(RemoveFromCartEvent(item.id)),
-            child: Padding(
-              padding: EdgeInsets.only(top: 4.h),
-              child: SvgPicture.asset(IconConstant.delete1),
+          SizedBox(width: 3.w),
+          Text(
+            'Non-Returnable',
+            style: TextStyle(
+              color: const Color(0xFFEA4335),
+              fontSize: 10.fSize,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ],
       ),
     );
   }
+
+  Widget _buildSelectedItemCard(
+    CartItem item, {
+    required CartState state,
+    required bool showPrice,
+  }) {
+    return ReusableProductCartItem(
+      item: item,
+      state: state,
+      showPrice: showPrice,
+    );
+  }
+
+
 
   Widget _buildDropdownChip<T>({
     required T value,
@@ -1028,6 +1180,7 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
         child: DropdownButton<T>(
           value: value,
           isDense: true,
+          menuMaxHeight: 220.h,
           dropdownColor: AppColours.secondary,
           icon: Icon(Icons.arrow_drop_down, color: Colors.black, size: 18),
           style: TextStyle(color: Colors.white, fontSize: 11.fSize),
@@ -1138,8 +1291,9 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
 
   Widget _buildOrderSummary({
     required int subtotal,
-    required int gst,
     required int deliveryFee,
+    required int discountAmount,
+    required int gst,
     required int total,
     required int wardrobeKitAmount,
     required bool subscriptionBooking,
@@ -1162,12 +1316,12 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
         SizedBox(height: 24.h),
         if (subscriptionBooking) ...[
           _summaryRow(kitTitle, 'Included in membership'),
-          SizedBox(height: 16.h),
+          SizedBox(height: 14.h),
           _summaryRow('Delivery Fee', 'Free'),
-          SizedBox(height: 16.h),
-          Divider(color: Colors.white.withOpacity(0.1), height: 1),
-          SizedBox(height: 24.h),
-          _summaryRow('Amount due today', '₹0', highlight: true),
+          SizedBox(height: 14.h),
+          Divider(color: Colors.white.withOpacity(0.15), height: 1),
+          SizedBox(height: 18.h),
+          _summaryRow('Total Amount Payable', '₹0', highlight: true),
         ] else if (isLoadingPayable) ...[
           // CHANGE: No interim local amounts — show loading until backend total is ready.
           Center(
@@ -1186,26 +1340,27 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
         ] else if (payableError != null) ...[
           _addressAlert(payableError),
         ] else ...[
-          if (hasWardrobeKit && wardrobeKitAmount > 0) ...[
-            _summaryRow(
-              kitTitle.isNotEmpty ? kitTitle : 'Wardrobe Kit',
-              CheckoutPricing.formatMoney(wardrobeKitAmount),
-            ),
-            SizedBox(height: 16.h),
-          ],
-          _summaryRow('Subtotal', CheckoutPricing.formatMoney(subtotal)),
-          SizedBox(height: 16.h),
-          _summaryRow('GST (18%)', CheckoutPricing.formatMoney(gst)),
-          SizedBox(height: 16.h),
+          _summaryRow('Items Subtotal', CheckoutPricing.formatMoney(subtotal)),
+          SizedBox(height: 14.h),
           _summaryRow(
             'Delivery Fee',
-            deliveryFee > 0 ? CheckoutPricing.formatMoney(deliveryFee) : 'Free',
+            deliveryFee > 0 ? CheckoutPricing.formatMoney(deliveryFee) : '₹0',
           ),
+          if (discountAmount > 0) ...[
+            SizedBox(height: 14.h),
+            _summaryRow(
+              'Discount',
+              '-${CheckoutPricing.formatMoney(discountAmount)}',
+              valueColor: const Color(0xFF4CAF50),
+            ),
+          ],
+          SizedBox(height: 14.h),
+          _summaryRow('Taxes (GST 18%)', CheckoutPricing.formatMoney(gst)),
           SizedBox(height: 16.h),
-          Divider(color: Colors.white.withOpacity(0.1), height: 1),
-          SizedBox(height: 24.h),
+          Divider(color: Colors.white.withOpacity(0.15), height: 1),
+          SizedBox(height: 18.h),
           _summaryRow(
-            'Grand Total',
+            'Total Amount Payable',
             CheckoutPricing.formatMoney(total),
             highlight: true,
           ),
@@ -1214,7 +1369,12 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
     );
   }
 
-  Widget _summaryRow(String title, String value, {bool highlight = false}) {
+  Widget _summaryRow(
+    String title,
+    String value, {
+    bool highlight = false,
+    Color? valueColor,
+  }) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       crossAxisAlignment: CrossAxisAlignment.baseline,
@@ -1224,8 +1384,8 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
           title,
           style: highlight
               ? CustomTextStyles.montserratBold.copyWith(
-                  fontSize: 18.fSize,
-                    color: AppColours.primary
+                  fontSize: 16.fSize,
+                  color: AppColours.primary,
                 )
               : CustomTextStyles.openSansRegular.copyWith(
                   fontSize: 14.fSize,
@@ -1236,12 +1396,12 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
           value,
           style: highlight
               ? CustomTextStyles.montserratBold.copyWith(
-                  fontSize: 24.fSize,
+                  fontSize: 20.fSize,
                   color: AppColours.primary,
                 )
               : CustomTextStyles.openSansSemiBold.copyWith(
                   fontSize: 14.fSize,
-                  color: AppColours.secondary,
+                  color: valueColor ?? AppColours.secondary,
                 ),
         ),
       ],

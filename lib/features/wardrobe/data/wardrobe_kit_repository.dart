@@ -43,4 +43,33 @@ class WardrobeKitRepository {
         .toList()
       ..sort((a, b) => a.durationDays.compareTo(b.durationDays));
   }
+
+  Future<Map<String, dynamic>> checkEligibility(String kitId) async {
+    final authToken = await _authStorage.getAuthToken();
+    if (authToken == null || authToken.isEmpty) {
+      throw const ApiException('Not logged in. Please login again.');
+    }
+
+    final json = await _apiClient.get(
+      ApiConstants.checkEligibilityPath(kitId),
+      authToken: authToken,
+    );
+
+    if (json['success'] != true) {
+      final data = json['data'];
+      if (data != null && data is Map<String, dynamic>) {
+        return data; // Return data even if success is false, if it has structured error data
+      }
+      throw ApiException(
+        json['message']?.toString() ?? 'Failed to check kit eligibility',
+      );
+    }
+
+    final data = json['data'];
+    if (data is! Map<String, dynamic>) {
+      throw const ApiException('Invalid eligibility response');
+    }
+
+    return data;
+  }
 }

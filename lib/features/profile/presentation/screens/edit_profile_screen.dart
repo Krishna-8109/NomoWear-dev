@@ -1,5 +1,7 @@
 import 'dart:typed_data';
 
+import 'package:dotted_border/dotted_border.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:nomowear/core/app_export.dart';
@@ -60,6 +62,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   bool _hasAuthToken = false;
   String? _profilePhotoUrl;
   String? _addressError;
+  double? _selectedLatitude;
+  double? _selectedLongitude;
+  String? _selectedAddressFromMap;
 
   String? _selectedHeight;
   String? _selectedWeight;
@@ -178,7 +183,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       }
       if (address.fullAddress != null && address.fullAddress!.isNotEmpty) {
         _addressController.text = address.fullAddress!;
+        _selectedAddressFromMap = address.fullAddress!;
       }
+      _selectedLatitude = address.latitude;
+      _selectedLongitude = address.longitude;
     }
 
     _selectedHeight = ProfileMeasurementUtils.heightFromApi(profile.height);
@@ -196,7 +204,15 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     );
   }
 
-  ({String? country, String? state, String? city, String? pincode, String? fullAddress})
+  ({
+    String? country,
+    String? state,
+    String? city,
+    String? pincode,
+    String? fullAddress,
+    double? latitude,
+    double? longitude,
+  })
       _addressPayload() {
     return (
       country: _selectedCountry != 'Country' ? _selectedCountry : null,
@@ -208,7 +224,77 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       fullAddress: _addressController.text.trim().isEmpty
           ? null
           : _addressController.text.trim(),
+      latitude: _selectedLatitude,
+      longitude: _selectedLongitude,
     );
+  }
+
+  Future<void> _openAddressMapPicker() async {
+    if (kDebugMode) {
+      debugPrint('[PROFILE_LOCATION] MAP_OPEN');
+    }
+    final result = await Navigator.pushNamed(
+      context,
+      AppRoutes.selectAddressScreen,
+      arguments: {
+        if (_selectedLatitude != null) 'latitude': _selectedLatitude,
+        if (_selectedLongitude != null) 'longitude': _selectedLongitude,
+      },
+    );
+    if (!mounted || result is! Map) return;
+
+    double? readCoord(dynamic value) {
+      if (value is double) return value;
+      if (value is num) return value.toDouble();
+      if (value is String) return double.tryParse(value);
+      return null;
+    }
+
+    final selectedAddress = result['locationDetails']?.toString().trim();
+    final lat = readCoord(result['latitude']);
+    final lng = readCoord(result['longitude']);
+    if (selectedAddress == null || selectedAddress.isEmpty) return;
+
+    final country = result['country']?.toString().trim();
+    final stateStr = result['state']?.toString().trim();
+    final city = result['city']?.toString().trim();
+    final pincode = result['pincode']?.toString().trim();
+
+    setState(() {
+      _addressController.text = selectedAddress;
+      _selectedAddressFromMap = selectedAddress;
+      _selectedLatitude = lat;
+      _selectedLongitude = lng;
+      _addressError = null;
+
+      if (country != null && country.isNotEmpty) {
+        _selectedCountry = country;
+      }
+      if (pincode != null && pincode.isNotEmpty) {
+        _pincodeController.text = pincode;
+      }
+    });
+
+    if (stateStr != null && stateStr.isNotEmpty) {
+      await _locationCubit.selectState(stateStr, preferredCity: city, clearCity: true);
+      if (!mounted) return;
+      final locState = _locationCubit.state;
+      setState(() {
+        if (locState.selectedState != null && locState.selectedState!.isNotEmpty) {
+          _selectedState = locState.selectedState!;
+        }
+        if (locState.selectedCity != null && locState.selectedCity!.isNotEmpty) {
+          _selectedCity = locState.selectedCity!;
+        }
+      });
+    }
+
+    if (kDebugMode) {
+      debugPrint('[PROFILE_LOCATION] SELECTED');
+      debugPrint('latitude=$_selectedLatitude');
+      debugPrint('longitude=$_selectedLongitude');
+      debugPrint('address=$selectedAddress');
+    }
   }
 
   Future<void> _saveChanges() async {
@@ -271,6 +357,8 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
             city: address.city,
             pincode: address.pincode,
             fullAddress: address.fullAddress,
+            latitude: address.latitude,
+            longitude: address.longitude,
             height: measurements.height,
             weight: measurements.weight,
             bodySkinType: measurements.bodySkinType,
@@ -292,6 +380,8 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
             city: address.city,
             pincode: address.pincode,
             fullAddress: address.fullAddress,
+            latitude: address.latitude,
+            longitude: address.longitude,
             height: measurements.height,
             weight: measurements.weight,
             bodySkinType: measurements.bodySkinType,
@@ -303,8 +393,11 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       if (!mounted) return;
       setState(() {});
       final refreshed = _hasAuthToken
-          ? await _profileRepository.getProfile(forceRefresh: true)
+          ? await _profileRepository.getProfile()
           : null;
+      if (refreshed?.profilePhoto != null && _pickedPhotoFile != null) {
+        PaintingBinding.instance.imageCache.evict(NetworkImage(refreshed!.profilePhoto!));
+      }
       final isComplete = refreshed != null
           ? ProfileCompletionHelper.isProfileComplete(refreshed)
           : true;
@@ -313,6 +406,9 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
       if (widget.popOnSave) {
         Navigator.pop(context, isComplete);
         return;
+      }
+      if (kDebugMode) {
+        debugPrint('[PROFILE_LOCATION] PROFILE_UPDATED');
       }
       Navigator.pushNamedAndRemoveUntil(
         context,
@@ -451,6 +547,53 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
               ),
               _fieldLabel('EMAIL *'),
               _textField(_emailController, hint: 'Enter Email'),
+              Padding(
+                padding: EdgeInsets.only(bottom: 8.h, top: 20.h),
+                child: Row(
+                  children: [
+                    Icon(Icons.home_outlined, color: AppColours.primary, size: 18),
+                    SizedBox(width: 6.w),
+                    Text(
+                      'SELECT ADDRESS',
+                      style: CustomTextStyles.montserratBold.copyWith(
+                        color: AppColours.primary,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Divider(
+                color: AppColours.primary.withOpacity(0.15),
+                thickness: 1,
+                height: 1,
+              ),
+              SizedBox(height: 16.h),
+              GestureDetector(
+                onTap: _openAddressMapPicker,
+                child: DottedBorder(
+                  color: AppColours.primary,
+                  strokeWidth: 1.2,
+                  dashPattern: const [4, 4],
+                  borderType: BorderType.RRect,
+                  radius: const Radius.circular(12),
+                  padding: EdgeInsets.symmetric(vertical: 14.h),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.location_on_outlined, color: AppColours.primary, size: 18),
+                      SizedBox(width: 8.w),
+                      Text(
+                        'SELECT ADDRESS ON MAP',
+                        style: CustomTextStyles.openSansSemiBold.copyWith(
+                          color: AppColours.primary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
               _fieldLabel('RESIDENTIAL ADDRESS'),
               _residentialAddressRow(),
               _fieldLabel('PINCODE *'),
@@ -460,9 +603,14 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
                 _addressController,
                 maxLines: 2,
                 hint: 'Enter your full address',
-                onChanged: (_) {
+                onChanged: (value) {
                   if (_addressError != null) {
                     setState(() => _addressError = null);
+                  }
+                  if (_selectedAddressFromMap != null &&
+                      value.trim() != _selectedAddressFromMap!.trim()) {
+                    _selectedLatitude = null;
+                    _selectedLongitude = null;
                   }
                 },
               ),
@@ -1065,27 +1213,10 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
     required String currentValue,
     required ValueChanged<String> onSelected,
   }) async {
-    // CHANGE: If lists are empty, refresh from LocationCubit before opening.
     var menuOptions = options.where((o) => o != hint).toList();
     if (menuOptions.isEmpty) {
-      if (id == 'state') {
-        await _locationCubit.loadStates(force: true);
-        if (!mounted) return;
-        menuOptions = _locationCubit.state.states;
-      } else if (id == 'city' && _selectedState != 'State') {
-        await _locationCubit.loadCitiesForState(_selectedState);
-        if (!mounted) return;
-        menuOptions = List<String>.from(_locationCubit.state.cities);
-      }
-      if (menuOptions.isEmpty) {
-        _showMessage(
-          id == 'city'
-              ? 'No cities found for $_selectedState'
-              : 'Unable to load states. Please try again.',
-        );
-        return;
-      }
-      setState(() {});
+      _showMessage('Please select an address from the map first.');
+      return;
     }
 
     setState(() => _activeDropdown = id);

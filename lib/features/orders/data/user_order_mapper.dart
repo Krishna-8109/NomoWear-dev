@@ -1,4 +1,3 @@
-import 'package:nomowear/core/utils/image_constant.dart';
 import 'package:nomowear/features/auth/data/models/customer.dart';
 import 'package:nomowear/features/orders/data/models/order_history.dart';
 import 'package:nomowear/features/orders/data/pending_return_store.dart';
@@ -6,15 +5,6 @@ import 'package:nomowear/features/profile/domain/user_order.dart';
 
 class UserOrderMapper {
   UserOrderMapper._();
-
-  static const _placeholderImages = [
-    ImageConstant.comfortWearImg1,
-    ImageConstant.comfortWearImg2,
-    ImageConstant.essentialWearImg1,
-    ImageConstant.essentialWearImg2,
-    ImageConstant.premiumWearImg1,
-    ImageConstant.professionalWearImg1,
-  ];
 
   static const _returnTimelineStatuses = {
     'RETURN_REQUESTED',
@@ -42,12 +32,36 @@ class UserOrderMapper {
     Customer? customer,
   }) {
     final items = order.orderItems;
-    final garmentCount = items.isEmpty
-        ? 1
-        : items.fold<int>(0, (sum, item) => sum + item.quantity);
 
-    final title = _title(order, items);
-    final coverImages = _coverImages(items);
+    OrderLineKitDetails? matchedKitDetails;
+    List<OrderKitSelectedItem> selectedGarments = [];
+    for (final item in items) {
+      if (item.kitDetails != null && item.kitDetails!.selectedItems.isNotEmpty) {
+        matchedKitDetails = item.kitDetails;
+        selectedGarments = item.kitDetails!.selectedItems;
+        break;
+      }
+    }
+
+    final isKit = selectedGarments.isNotEmpty;
+    final garmentCount = isKit
+        ? selectedGarments.length
+        : (items.isEmpty
+            ? 1
+            : items.fold<int>(0, (sum, item) => sum + item.quantity));
+
+    final title = isKit
+        ? _kitTitle(matchedKitDetails, order)
+        : _title(order, items);
+
+    final coverImages = isKit
+        ? selectedGarments
+            .map((g) => g.primaryImageUrl?.trim())
+            .whereType<String>()
+            .where((url) => url.isNotEmpty)
+            .toList()
+        : _coverImages(items);
+
     final isDelivered = order.isDelivered;
     final pendingReturn = PendingReturnStore.instance.contains(order.id);
     // Waitlisted returns stay ACTIVE on API until admin approval.
@@ -60,6 +74,11 @@ class UserOrderMapper {
       pendingReturn: pendingReturn,
     );
     final address = _resolveAddress(order, customer);
+
+    final parsedDeliveryDate = _parseDate(order.resolvedDeliveryDate) ??
+        _parseDate(matchedKitDetails?.deliveryDate) ??
+        order.createdAt;
+    final formattedDelivery = _formatDisplayDate(parsedDeliveryDate);
 
     // Once admin approves (API reflects return timeline), drop local pending.
     if (order.shouldShowReturnTimeline || order.isReturnComplete) {
@@ -86,7 +105,29 @@ class UserOrderMapper {
       addressLines: address.lines,
       mobileDisplay: address.mobile,
       deliveredSummaryShowsReturn: canReturn,
+      isWardrobeKit: isKit,
+      totalGarmentsCount: garmentCount,
+      deliveryDateFormatted: formattedDelivery,
+      totalAmount: order.totalAmount,
     );
+  }
+
+  static String _kitTitle(
+    OrderLineKitDetails? kitDetails,
+    OrderHistoryItem order,
+  ) {
+    final rawType = kitDetails?.kitType?.trim();
+    if (rawType != null &&
+        rawType.isNotEmpty &&
+        rawType.toLowerCase() != 'custom' &&
+        rawType.toLowerCase() != 'standard') {
+      return rawType;
+    }
+    final days = kitDetails?.durationDays ?? order.resolvedKitDurationDays;
+    if (days != null && days > 0) {
+      return '$days-Day Wardrobe Kit';
+    }
+    return 'Wardrobe Kit';
   }
 
   static ({String label, String date}) _statusCopy(
@@ -244,29 +285,12 @@ class UserOrderMapper {
   }
 
   static List<String> _coverImages(List<OrderHistoryLineItem> items) {
-    if (items.isEmpty) {
-      return _placeholderImages.take(4).toList();
-    }
-
-    final images = items
+    return items
         .map((item) => item.imageUrl?.trim())
         .whereType<String>()
         .where((url) => url.isNotEmpty)
+        .take(4)
         .toList();
-
-    if (images.length >= 4) {
-      return images.take(4).toList();
-    }
-
-    if (images.isNotEmpty) {
-      return images;
-    }
-
-    final count = items.length >= 4 ? 4 : items.length;
-    return List<String>.generate(
-      count,
-      (index) => _placeholderImages[index % _placeholderImages.length],
-    );
   }
 
   static List<OrderLineItem> _lineItems(
@@ -293,10 +317,12 @@ class UserOrderMapper {
         sizeLabel: resolvedSize,
         statusText: statusText,
         isDelivered: isDelivered,
-        imageAsset: (image != null && image.isNotEmpty)
-            ? image
-            : _placeholderImages[index % _placeholderImages.length],
+        imageAsset: (image != null && image.isNotEmpty) ? image : '',
         category: _categoryForLineItem(item),
+        itemType: item.itemType,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        lineTotal: item.lineTotal,
       );
     }).toList();
   }
@@ -318,12 +344,14 @@ class UserOrderMapper {
             productId: selectedItem.productId ?? item.productId,
             productName: selectedItem.productName ?? item.productName,
             size: selectedItem.size ?? item.size,
-            quantity: 1,
-            unitPrice: item.unitPrice,
-            lineTotal: item.lineTotal,
+            quantity: selectedItem.quantity,
+            unitPrice: selectedItem.price,
+            lineTotal: selectedItem.price * selectedItem.quantity,
             imageUrl: selectedItem.primaryImageUrl ?? item.imageUrl,
             productClass: item.productClass,
             kitDetails: item.kitDetails,
+            itemType: item.itemType,
+            cartSection: item.cartSection,
           ),
         );
       }

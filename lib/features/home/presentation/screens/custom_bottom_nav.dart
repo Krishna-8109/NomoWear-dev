@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -18,7 +19,11 @@ class CustomBottomNav extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return BlocBuilder<CartBloc, CartState>(
+      buildWhen: (previous, current) => previous.totalItems != current.totalItems,
       builder: (context, cartState) {
+        if (kDebugMode) {
+          debugPrint('[CART_PERF] REBUILD badge total=${cartState.totalItems}');
+        }
         return Container(
           margin: EdgeInsets.fromLTRB(16.w, 0, 16.w, 16.h),
           height: 72.h,

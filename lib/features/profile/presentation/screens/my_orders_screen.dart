@@ -241,148 +241,274 @@ class _OrderListTile extends StatelessWidget {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-
-            /// IMAGE
+            /// IMAGE COLLAGE / THUMBNAIL
             _CoverThumb(order: order),
 
             SizedBox(width: 12.w),
 
             /// RIGHT SIDE
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-
-                  /// TITLE
-                  Text(
-                    order.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 14,color: AppColours.primary),
-                  ),
-
-                  SizedBox(height: 4.h),
-
-                  /// ORDER ID
-                  RichText(
-                    text: TextSpan(
-                      children: [
-                        TextSpan(
-                          text: 'Order Id: ',
-                          style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 12),
-
-                        ),
-                        TextSpan(
-                          text: order.orderIdDisplay,
-                          style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 12),
-
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  SizedBox(height: 4.h),
-
-                  /// ATTRIBUTE
-                  Text(
-                    '${order.attributeLabel}: ${order.attributeValue}',
-                    style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 12),
-
-                  ),
-
-                  SizedBox(height: 4.h),
-
-                  /// STATUS
-                  Text(
-                    '${order.statusLabel}: ${order.statusDate}',
-                    style: CustomTextStyles.montserratSemiBold.copyWith(fontSize: 12),
-
-                  ),
-
-                  SizedBox(height: 12.h),
-
-                  /// BUTTON
-                  SizedBox(
-                    width: double.infinity,
-                    height: 42.h,
-                    child: order.canReturn
-                        ? ElevatedButton(
-                            onPressed: () async {
-                              final submitted = await Navigator.pushNamed(
-                                context,
-                                AppRoutes.returnOrderScreen,
-                                arguments: {
-                                  'orderId': order.id,
-                                  'orderNumber': order.orderIdDisplay,
-                                },
-                              );
-                              if (submitted == true && context.mounted) {
-                                await onReturnSubmitted?.call();
-                                if (!context.mounted) return;
-                                Navigator.pushNamed(
-                                  context,
-                                  AppRoutes.orderTrackingScreen,
-                                  arguments: order.id,
-                                );
-                              }
-                            },
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFFD8B26A),
-                              elevation: 0,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                            ),
-                            child: Text(
-                              'Return This Order',
-                              style: TextStyle(
-                                color: Colors.black,
-                                fontSize: 13.fSize,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          )
-                        : !order.isDelivered || order.isInReturnFlow
-                            ? OutlinedButton(
-                                onPressed: () => Navigator.pushNamed(
-                                  context,
-                                  AppRoutes.orderTrackingScreen,
-                                  arguments: order.id,
-                                ),
-                                style: OutlinedButton.styleFrom(
-                                  side: BorderSide(
-                                    color: order.isInReturnFlow
-                                        ? const Color(0xFFD8B26A)
-                                        : const Color(0x66E6C27A),
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                ),
-                                child: Text(
-                                  order.isInReturnFlow
-                                      ? 'Track Return'
-                                      : 'Track Your Order',
-                                  style: CustomTextStyles.openSansSemiBold
-                                      .copyWith(
-                                    fontSize: 10,
-                                    color: order.isInReturnFlow
-                                        ? Colors.white
-                                        : AppColours.secondary,
-                                  ),
-                                ),
-                              )
-                            : const SizedBox.shrink(),
-                  ),
-                ],
-              ),
+              child: order.isWardrobeKit
+                  ? _buildWardrobeKitInfo(context)
+                  : _buildNormalOrderInfo(context),
             ),
           ],
         ),
       ),
     );
   }
+
+  Widget _buildWardrobeKitInfo(BuildContext context) {
+    final orderIdFormatted = order.orderIdDisplay.startsWith('#')
+        ? order.orderIdDisplay
+        : '#${order.orderIdDisplay}';
+
+    final garmentCountText = order.totalGarmentsCount > 0
+        ? '${order.totalGarmentsCount}'
+        : order.attributeValue;
+
+    final deliveryDateText = order.deliveryDateFormatted != null &&
+            order.deliveryDateFormatted != '-'
+        ? order.deliveryDateFormatted!
+        : order.statusDate;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        /// KIT TITLE
+        Text(
+          order.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: CustomTextStyles.montserratSemiBold.copyWith(
+            fontSize: 14.fSize,
+            color: AppColours.primary,
+          ),
+        ),
+
+        SizedBox(height: 6.h),
+
+        /// ORDER ID
+        RichText(
+          text: TextSpan(
+            children: [
+              TextSpan(
+                text: 'Order Id: ',
+                style: CustomTextStyles.montserratSemiBold.copyWith(
+                  fontSize: 12.fSize,
+                  color: Colors.white,
+                ),
+              ),
+              TextSpan(
+                text: orderIdFormatted,
+                style: CustomTextStyles.montserratSemiBold.copyWith(
+                  fontSize: 12.fSize,
+                  color: Colors.white.withOpacity(0.85),
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        SizedBox(height: 4.h),
+
+        /// NO OF GARMENTS
+        Text(
+          'No of Garments: $garmentCountText',
+          style: CustomTextStyles.montserratSemiBold.copyWith(
+            fontSize: 12.fSize,
+            color: Colors.white,
+          ),
+        ),
+
+        SizedBox(height: 4.h),
+
+        /// DELIVERY DATE
+        Text(
+          'Delivery Date: $deliveryDateText',
+          style: CustomTextStyles.montserratSemiBold.copyWith(
+            fontSize: 12.fSize,
+            color: Colors.white,
+          ),
+        ),
+
+        SizedBox(height: 10.h),
+
+        /// TRACK YOUR ORDER BUTTON
+        SizedBox(
+          width: double.infinity,
+          height: 38.h,
+          child: OutlinedButton(
+            onPressed: () => Navigator.pushNamed(
+              context,
+              AppRoutes.orderTrackingScreen,
+              arguments: order.id,
+            ),
+            style: OutlinedButton.styleFrom(
+              side: BorderSide(
+                color: AppColours.primary.withOpacity(0.45),
+                width: 1,
+              ),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+              padding: EdgeInsets.zero,
+            ),
+            child: Text(
+              'Track Your Order',
+              style: CustomTextStyles.openSansSemiBold.copyWith(
+                fontSize: 11.fSize,
+                color: Colors.white,
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNormalOrderInfo(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        /// TITLE
+        Text(
+          order.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: CustomTextStyles.montserratSemiBold.copyWith(
+            fontSize: 14.fSize,
+            color: AppColours.primary,
+          ),
+        ),
+
+        SizedBox(height: 4.h),
+
+        /// ORDER ID
+        RichText(
+          text: TextSpan(
+            children: [
+              TextSpan(
+                text: 'Order Id: ',
+                style: CustomTextStyles.montserratSemiBold.copyWith(
+                  fontSize: 12.fSize,
+                  color: Colors.white,
+                ),
+              ),
+              TextSpan(
+                text: order.orderIdDisplay.startsWith('#')
+                    ? order.orderIdDisplay
+                    : '#${order.orderIdDisplay}',
+                style: CustomTextStyles.montserratSemiBold.copyWith(
+                  fontSize: 12.fSize,
+                  color: Colors.white,
+                ),
+              ),
+            ],
+          ),
+        ),
+
+        SizedBox(height: 4.h),
+
+        /// ATTRIBUTE
+        Text(
+          '${order.attributeLabel}: ${order.attributeValue}',
+          style: CustomTextStyles.montserratSemiBold.copyWith(
+            fontSize: 12.fSize,
+            color: Colors.white,
+          ),
+        ),
+
+        SizedBox(height: 4.h),
+
+        /// STATUS
+        Text(
+          '${order.statusLabel}: ${order.statusDate}',
+          style: CustomTextStyles.montserratSemiBold.copyWith(
+            fontSize: 12.fSize,
+            color: Colors.white,
+          ),
+        ),
+
+        SizedBox(height: 12.h),
+
+        /// BUTTON
+        SizedBox(
+          width: double.infinity,
+          height: 42.h,
+          child: order.canReturn
+              ? ElevatedButton(
+                  onPressed: () async {
+                    final submitted = await Navigator.pushNamed(
+                      context,
+                      AppRoutes.returnOrderScreen,
+                      arguments: {
+                        'orderId': order.id,
+                        'orderNumber': order.orderIdDisplay,
+                      },
+                    );
+                    if (submitted == true && context.mounted) {
+                      await onReturnSubmitted?.call();
+                      if (!context.mounted) return;
+                      Navigator.pushNamed(
+                        context,
+                        AppRoutes.orderTrackingScreen,
+                        arguments: order.id,
+                      );
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFD8B26A),
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: Text(
+                    'Return This Order',
+                    style: TextStyle(
+                      color: Colors.black,
+                      fontSize: 13.fSize,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                )
+              : !order.isDelivered || order.isInReturnFlow
+                  ? OutlinedButton(
+                      onPressed: () => Navigator.pushNamed(
+                        context,
+                        AppRoutes.orderTrackingScreen,
+                        arguments: order.id,
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(
+                          color: order.isInReturnFlow
+                              ? const Color(0xFFD8B26A)
+                              : const Color(0x66E6C27A),
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: Text(
+                        order.isInReturnFlow
+                            ? 'Track Return'
+                            : 'Track Your Order',
+                        style: CustomTextStyles.openSansSemiBold.copyWith(
+                          fontSize: 10,
+                          color: order.isInReturnFlow
+                              ? Colors.white
+                              : AppColours.secondary,
+                        ),
+                      ),
+                    )
+                  : const SizedBox.shrink(),
+        ),
+      ],
+    );
+  }
 }
+
 class _CoverThumb extends StatelessWidget {
   final UserOrder order;
 
@@ -390,27 +516,52 @@ class _CoverThumb extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const width = 120.0;
-    const height = 140.0;
+    const width = 118.0;
+    const height = 135.0;
     final images = order.coverImageAssets;
 
     if (images.isEmpty) {
-      return _OrderImage(
-        source: '',
+      return Container(
         width: width,
         height: height,
-        fit: BoxFit.cover,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: const Color(0xFFD8B26A),
+            width: 1.2,
+          ),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(11),
+          child: _OrderImage(
+            source: '',
+            width: width,
+            height: height,
+            fit: BoxFit.cover,
+          ),
+        ),
       );
     }
 
     if (images.length == 1) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(12),
-        child: _OrderImage(
-          source: images.first,
-          width: width,
-          height: height,
-          fit: BoxFit.cover,
+      return Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: const Color(0xFFD8B26A),
+            width: 1.2,
+          ),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(11),
+          child: _OrderImage(
+            source: images.first,
+            width: width,
+            height: height,
+            fit: BoxFit.cover,
+          ),
         ),
       );
     }
@@ -422,27 +573,134 @@ class _CoverThumb extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         border: Border.all(
           color: const Color(0xFFD8B26A),
+          width: 1.2,
         ),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(11),
-        child: GridView.builder(
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: 4,
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 2,
-            crossAxisSpacing: 1,
-            mainAxisSpacing: 1,
-            childAspectRatio: 0.82,
-          ),
-          itemBuilder: (context, index) {
-            return _OrderImage(
-              source: images[index % images.length],
-              fit: BoxFit.cover,
-            );
-          },
-        ),
+        child: _buildCollageContent(images),
       ),
+    );
+  }
+
+  Widget _buildCollageContent(List<String> images) {
+    if (images.length == 2) {
+      return Row(
+        children: [
+          Expanded(
+            child: _OrderImage(
+              source: images[0],
+              fit: BoxFit.cover,
+            ),
+          ),
+          const SizedBox(width: 1.5),
+          Expanded(
+            child: _OrderImage(
+              source: images[1],
+              fit: BoxFit.cover,
+            ),
+          ),
+        ],
+      );
+    }
+
+    if (images.length == 3) {
+      return Column(
+        children: [
+          Expanded(
+            child: Row(
+              children: [
+                Expanded(
+                  child: _OrderImage(
+                    source: images[0],
+                    fit: BoxFit.cover,
+                  ),
+                ),
+                const SizedBox(width: 1.5),
+                Expanded(
+                  child: _OrderImage(
+                    source: images[1],
+                    fit: BoxFit.cover,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 1.5),
+          Expanded(
+            child: _OrderImage(
+              source: images[2],
+              fit: BoxFit.cover,
+            ),
+          ),
+        ],
+      );
+    }
+
+    // 4 or more garments
+    final showOverlay = images.length > 4;
+    final remainingCount = images.length - 3;
+
+    return Column(
+      children: [
+        Expanded(
+          child: Row(
+            children: [
+              Expanded(
+                child: _OrderImage(
+                  source: images[0],
+                  fit: BoxFit.cover,
+                ),
+              ),
+              const SizedBox(width: 1.5),
+              Expanded(
+                child: _OrderImage(
+                  source: images[1],
+                  fit: BoxFit.cover,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 1.5),
+        Expanded(
+          child: Row(
+            children: [
+              Expanded(
+                child: _OrderImage(
+                  source: images[2],
+                  fit: BoxFit.cover,
+                ),
+              ),
+              const SizedBox(width: 1.5),
+              Expanded(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    _OrderImage(
+                      source: images[3],
+                      fit: BoxFit.cover,
+                    ),
+                    if (showOverlay)
+                      Container(
+                        color: Colors.black.withOpacity(0.65),
+                        alignment: Alignment.center,
+                        child: Text(
+                          '+$remainingCount',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 14,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }

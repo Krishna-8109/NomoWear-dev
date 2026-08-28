@@ -31,8 +31,6 @@ class ProfileBloc extends Bloc<ProfileEvent, ProfileState> {
       ));
     } else {
       emit(state.copyWith(isSaving: true, addressError: null));
-      // Simulate API call
-      await Future.delayed(const Duration(milliseconds: 500));
       emit(state.copyWith(isSaving: false, isSuccess: true));
     }
   }

@@ -2,21 +2,31 @@ import 'package:dotted_border/dotted_border.dart';
 import 'package:flutter/gestures.dart';
 import 'package:nomowear/core/app_export.dart';
 import 'package:nomowear/core/network/api_exception.dart';
-import 'package:nomowear/features/cart/data/cart_repository.dart';
 import 'package:nomowear/features/cart/presentation/bloc/cart_bloc.dart';
+import 'package:nomowear/features/cart/presentation/utils/cart_limits.dart';
+import 'package:nomowear/features/cart/presentation/widgets/qty_picker_sheet.dart';
 import 'package:nomowear/features/checkout/data/checkout_session.dart';
+import 'package:nomowear/features/checkout/presentation/utils/checkout_initiate_request.dart';
 import 'package:nomowear/features/checkout/presentation/utils/checkout_pricing.dart';
 import 'package:nomowear/features/profile/presentation/utils/profile_order_guard.dart';
 import 'package:nomowear/features/home/presentation/bloc/home_bloc.dart';
 import 'package:nomowear/features/orders/data/order_repository.dart';
 import 'package:nomowear/features/profile/data/profile_cache.dart';
 import 'package:nomowear/features/products/data/product_cache.dart';
+import 'package:nomowear/features/products/data/models/product_variant.dart';
 import 'package:nomowear/features/products/data/product_mapper.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:nomowear/features/wardrobe/presentation/screens/product_details_screen.dart';
+import 'package:nomowear/features/wardrobe/presentation/widgets/variant_selection_sheet.dart';
+import 'package:nomowear/features/cart/presentation/widgets/cart_quantity_control.dart';
 import 'package:nomowear/features/wardrobe/presentation/screens/wardrobe_screen.dart';
+import 'package:nomowear/features/cart/presentation/widgets/reusable_product_cart_item.dart';
 
 class CartScreen extends StatefulWidget {
-  const CartScreen({Key? key}) : super(key: key);
+  const CartScreen({Key? key, this.isActive = true}) : super(key: key);
+
+  /// Home tab passes the visible index. Named routes leave this true.
+  final bool isActive;
 
   @override
   State<CartScreen> createState() => _CartScreenState();
@@ -24,13 +34,62 @@ class CartScreen extends StatefulWidget {
 
 class _CartScreenState extends State<CartScreen> {
   final TextEditingController _noteController = TextEditingController();
-  final CartRepository _cartRepository = CartRepository();
   final OrderRepository _orderRepository = OrderRepository();
-  bool _wardrobeGarmentsExpanded = false;
+  bool _isSubscriptionKitExpanded = false;
+  bool _isNonSubscriptionKitExpanded = false;
+  bool _isEssentialsExpanded = true;
+  bool _isKidsExpanded = true;
   bool _isPreparingCheckout = false;
 
   static const List<String> _allSizes = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
-  static const List<int> _qtyOptions = [1, 2, 3, 4, 5];
+  static const int _essentialsMaxQty = 5;
+
+  ProductVariant? _resolveVariant(CartItem item) {
+    final product = ProductCache.instance.findById(item.productId);
+    if (product == null) return null;
+
+    String? currentColor;
+    if (item.variantId != null) {
+      final oldVariant = product.variants.where((v) => v.id == item.variantId).firstOrNull;
+      if (oldVariant != null) {
+        currentColor = ProductMapper.optionValue(oldVariant, 'Color');
+      }
+    }
+
+    return ProductMapper.matchingVariant(
+      variants: product.variants,
+      selectedColor: currentColor,
+      selectedSize: item.selectedSize,
+    );
+  }
+
+  /// Qty popup: wardrobe → 1..kit garment limit; essentials → 1..5.
+  List<int> _qtyOptionsFor(CartState state, CartItem item) {
+    int maxQty;
+    if (item.isEssential) {
+      maxQty = _essentialsMaxQty;
+    } else {
+      maxQty = CartLimits.effectiveMaxWardrobeGarments(state);
+    }
+
+    final variant = _resolveVariant(item);
+    if (variant != null && variant.stockOnHand >= 0) {
+      maxQty = variant.stockOnHand;
+    }
+
+    final upper = maxQty < 1 ? 1 : maxQty;
+    // ALWAYS strictly regenerate up to the new maxQty
+    final qtyOptions = List<int>.generate(upper, (i) => i + 1);
+
+    debugPrint('===== OPEN QUANTITY SELECTOR =====');
+    debugPrint('variantId = ${variant?.id ?? item.variantId}');
+    debugPrint('variantName = ${variant?.variantName}');
+    debugPrint('maxQty = $maxQty');
+    debugPrint('optionsCount = ${qtyOptions.length}');
+    debugPrint('==================================');
+
+    return qtyOptions;
+  }
 
   @override
   void initState() {
@@ -40,11 +99,24 @@ class _CartScreenState extends State<CartScreen> {
       CheckoutSession.instance.restore().then((_) {
         if (mounted) setState(() {});
       });
-      final cartState = context.read<CartBloc>().state;
-      if (cartState.items.isEmpty) {
-        context.read<CartBloc>().add(LoadCartEvent());
+      if (widget.isActive) {
+        context.read<CartBloc>().add(
+              LoadCartEvent(
+                source: 'CartScreen.initState',
+              ),
+            );
       }
     });
+  }
+
+  @override
+  void didUpdateWidget(covariant CartScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.isActive && !oldWidget.isActive) {
+      context.read<CartBloc>().add(
+            LoadCartEvent(source: 'CartScreen.didUpdateWidget'),
+          );
+    }
   }
 
   @override
@@ -57,16 +129,28 @@ class _CartScreenState extends State<CartScreen> {
   Widget build(BuildContext context) {
     return BlocConsumer<CartBloc, CartState>(
       listenWhen: (previous, current) =>
-          previous.items.isNotEmpty && current.isEmpty,
+          previous.items.isNotEmpty && current.isConfirmedEmpty,
       listener: (context, state) {
-        if (state.isEmpty && _wardrobeGarmentsExpanded) {
-          setState(() => _wardrobeGarmentsExpanded = false);
+        if (state.isEmpty) {
+          setState(() {
+            _isSubscriptionKitExpanded = false;
+            _isNonSubscriptionKitExpanded = false;
+            _isEssentialsExpanded = true;
+            _isKidsExpanded = true;
+          });
         }
       },
       builder: (context, state) {
-        final isEmpty = state.isEmpty;
+        final showLoading = state.showLoading;
+        final isEmpty = state.isConfirmedEmpty;
 
-        return Scaffold(
+        return PopScope(
+          canPop: !isEmpty,
+          onPopInvokedWithResult: (didPop, result) {
+            if (didPop) return;
+            Navigator.popUntil(context, ModalRoute.withName(AppRoutes.homeScreen));
+          },
+          child: Scaffold(
           backgroundColor: const Color(0xFF0F1012),
           body: Stack(
             children: [
@@ -75,13 +159,23 @@ class _CartScreenState extends State<CartScreen> {
                 child: SafeArea(
                   child: Column(
                     children: [
-                      _buildAppBar(isEmpty ? 0 : state.totalItems),
+                      _buildAppBar(isEmpty || showLoading ? 0 : state.totalItems),
                       Expanded(
-                        child: isEmpty
-                            ? _buildEmptyCart()
-                            : _buildCartContent(context, state),
+                        child: showLoading
+                            ? _buildCartLoading()
+                            : RefreshIndicator(
+                                color: AppColours.primary,
+                                backgroundColor: const Color(0xFF16181D),
+                                onRefresh: () => context
+                                    .read<CartBloc>()
+                                    .refresh(source: 'CartScreen.pullToRefresh'),
+                                child: isEmpty
+                                    ? _buildEmptyCart()
+                                    : _buildCartContent(context, state),
+                              ),
                       ),
-                      if (!isEmpty) _buildPlaceOrderButton(context),
+                      if (!isEmpty && !showLoading)
+                        _buildPlaceOrderButton(context),
                     ],
                   ),
                 ),
@@ -105,6 +199,7 @@ class _CartScreenState extends State<CartScreen> {
               ],
             ],
           ),
+        ),
         );
       },
     );
@@ -155,33 +250,103 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
   Widget _buildCartContent(BuildContext context, CartState state) {
-    final wardrobeItems = state.groupedWardrobeItems;
-    final essentialItems = state.groupedEssentialItems;
+    final subscriptionItems = state.subscriptionGarmentItems;
+    final paidRentalItems = state.paidRentalGarmentItems;
+    final essentialItems = state.essentialsOnlyItems;
+    final kidsItems = state.kidsItems;
+    final hasWardrobe = state.wardrobeItems.isNotEmpty;
+    final hasPurchase = essentialItems.isNotEmpty || kidsItems.isNotEmpty;
 
-    if (wardrobeItems.isEmpty && essentialItems.isEmpty) {
+    if (!hasWardrobe && !hasPurchase) {
       return _buildEmptyCart();
     }
 
     return SingleChildScrollView(
+      physics: const AlwaysScrollableScrollPhysics(),
       padding: EdgeInsets.symmetric(horizontal: 20.w),
       child: Column(
-
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SizedBox(height: 16.h),
           _buildBackNavigationRow(context, state),
 
-          if (wardrobeItems.isNotEmpty) ...[
+          if (subscriptionItems.isNotEmpty) ...[
             SizedBox(height: 24.h),
-            _buildWardrobeKitSection(context, state, wardrobeItems),
+            _buildWardrobeKitSection(
+              context,
+              state,
+              subscriptionItems,
+              isExpanded: _isSubscriptionKitExpanded,
+              onToggle: () => setState(() => _isSubscriptionKitExpanded = !_isSubscriptionKitExpanded),
+              sectionTitle: 'SUBSCRIPTION ITEMS',
+              showGarmentPrices: false,
+            ),
+          ],
+          if (paidRentalItems.isNotEmpty) ...[
+            if (subscriptionItems.isNotEmpty) SizedBox(height: 24.h),
+            if (subscriptionItems.isNotEmpty) Divider(color: Colors.white12),
+            SizedBox(height: 16.h),
+            _buildWardrobeKitSection(
+              context,
+              state,
+              paidRentalItems,
+              isExpanded: _isNonSubscriptionKitExpanded,
+              onToggle: () => setState(() => _isNonSubscriptionKitExpanded = !_isNonSubscriptionKitExpanded),
+              sectionTitle: 'NON-SUBSCRIPTION ITEMS',
+              showGarmentPrices: true,
+            ),
           ],
           if (essentialItems.isNotEmpty) ...[
-            if (wardrobeItems.isNotEmpty) SizedBox(height: 24.h),
-            if (wardrobeItems.isNotEmpty) Divider(color: Colors.white12),
+            if (hasWardrobe) SizedBox(height: 24.h),
+            if (hasWardrobe) Divider(color: Colors.white12),
             SizedBox(height: 16.h),
-            _buildSectionHeader('ESSENTIAL WEAR', '${essentialItems.length} Item'),
+            GestureDetector(
+              onTap: () => setState(() => _isEssentialsExpanded = !_isEssentialsExpanded),
+              behavior: HitTestBehavior.opaque,
+              child: _buildSectionHeader(
+                'ESSENTIALS',
+                '${essentialItems.fold<int>(0, (s, i) => s + i.quantity)} Item${essentialItems.length == 1 ? '' : 's'}',
+                isNonReturnable: true,
+              ),
+            ),
+            if (_isEssentialsExpanded) ...[
+              SizedBox(height: 16.h),
+              ...essentialItems.map(
+                (item) => _buildCartItem(
+                  context,
+                  item,
+                  state: state,
+                  isWardrobe: false,
+                ),
+              ),
+            ],
+          ],
+          if (kidsItems.isNotEmpty) ...[
+            if (hasWardrobe || essentialItems.isNotEmpty)
+              SizedBox(height: 24.h),
+            if (hasWardrobe || essentialItems.isNotEmpty)
+              Divider(color: Colors.white12),
             SizedBox(height: 16.h),
-            ...essentialItems.map((item) => _buildCartItem(context, item, isWardrobe: false)).toList(),
+            GestureDetector(
+              onTap: () => setState(() => _isKidsExpanded = !_isKidsExpanded),
+              behavior: HitTestBehavior.opaque,
+              child: _buildSectionHeader(
+                'KIDS',
+                '${kidsItems.fold<int>(0, (s, i) => s + i.quantity)} Item${kidsItems.length == 1 ? '' : 's'}',
+                isNonReturnable: true,
+              ),
+            ),
+            if (_isKidsExpanded) ...[
+              SizedBox(height: 16.h),
+              ...kidsItems.map(
+                (item) => _buildCartItem(
+                  context,
+                  item,
+                  state: state,
+                  isWardrobe: false,
+                ),
+              ),
+            ],
           ],
           SizedBox(height: 28.h),
           _buildDeliveryDetails(),
@@ -195,12 +360,44 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
+  Widget _buildGarmentListSection(
+    BuildContext context,
+    CartState state,
+    List<CartItem> items, {
+    required String title,
+    required bool showPrice,
+  }) {
+    final garmentCount =
+        items.fold<int>(0, (sum, item) => sum + item.quantity);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionHeader(
+          title,
+          '$garmentCount Garment${garmentCount == 1 ? '' : 's'}',
+        ),
+        SizedBox(height: 16.h),
+        ...items.map(
+          (item) => _buildCartItem(
+            context,
+            item,
+            state: state,
+            isWardrobe: true,
+            showPrice: showPrice,
+          ),
+        ),
+      ],
+    );
+  }
+
   String? _resolveListingCategory(CartState state) {
     if (state.wardrobeItems.isNotEmpty) {
-      return state.wardrobeItems.first.category ?? 'Comfort Wardrobe';
+      final category = state.wardrobeItems.first.category?.trim();
+      if (category != null && category.isNotEmpty) return category;
     }
     if (state.essentialItems.isNotEmpty) {
-      return state.essentialItems.first.category ?? 'Essentials Wardrobe';
+      final category = state.essentialItems.first.category?.trim();
+      if (category != null && category.isNotEmpty) return category;
     }
     return null;
   }
@@ -265,53 +462,8 @@ class _CartScreenState extends State<CartScreen> {
       );
     }
 
-    WardrobeItem? match;
-
-    final categoryItems = item.category != null
-        ? WardrobeCatalogue.items[item.category]
-        : null;
-    if (categoryItems != null) {
-      for (final wardrobeItem in categoryItems) {
-        if (wardrobeItem.title == item.title) {
-          match = wardrobeItem;
-          break;
-        }
-      }
-    }
-
-    if (match == null) {
-      for (final entry in WardrobeCatalogue.items.entries) {
-        for (final wardrobeItem in entry.value) {
-          if (wardrobeItem.title == item.title) {
-            match = wardrobeItem;
-            break;
-          }
-        }
-        if (match != null) break;
-      }
-    }
-
-    if (match != null) {
-      return WardrobeItem(
-        productId: match.productId,
-        title: match.title,
-        description: match.description,
-        imageUrl: item.imageUrl,
-        price: item.price ?? match.price,
-        imageUrls: match.imageUrls,
-        colorVariantImages: match.colorVariantImages,
-        colorNames: match.colorNames,
-        sizes: match.sizes,
-        ages: match.ages,
-        productDetails: match.productDetails,
-        variants: match.variants,
-        category: item.category ?? match.category,
-        genderTag: match.genderTag,
-      );
-    }
-
     return WardrobeItem(
-      productId: productId.length > 20 ? productId : null,
+      productId: productId.isNotEmpty ? productId : null,
       title: item.title,
       description: '',
       imageUrl: item.imageUrl,
@@ -381,13 +533,31 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
-  Widget _buildSectionHeader(String title, String trailing) {
+  Widget _buildSectionHeader(
+    String title,
+    String trailing, {
+    bool isNonReturnable = false,
+  }) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Text(
-          title,
-          style: CustomTextStyles.montserratBold.copyWith(fontSize: 12,color: AppColours.primary,letterSpacing: 1),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              title,
+              style: CustomTextStyles.montserratBold.copyWith(
+                fontSize: 12,
+                color: AppColours.primary,
+                letterSpacing: 1,
+              ),
+            ),
+            if (isNonReturnable) ...[
+              SizedBox(width: 8.w),
+              _buildNonReturnableBadge(),
+            ],
+          ],
         ),
         Text(
           trailing,
@@ -400,38 +570,80 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
+  Widget _buildNonReturnableBadge() {
+    return Container(
+      padding: EdgeInsets.symmetric(horizontal: 8.w, vertical: 3.h),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEA4335).withOpacity(0.12),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: const Color(0xFFEA4335).withOpacity(0.6),
+          width: 1,
+        ),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.replay_rounded,
+            color: const Color(0xFFEA4335),
+            size: 11.w,
+          ),
+          SizedBox(width: 3.w),
+          Text(
+            'Non-Returnable',
+            style: TextStyle(
+              color: const Color(0xFFEA4335),
+              fontSize: 10.fSize,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildWardrobeKitSection(
     BuildContext context,
     CartState state,
-    List<CartItem> wardrobeItems,
-  ) {
+    List<CartItem> wardrobeItems, {
+    required bool isExpanded,
+    required VoidCallback onToggle,
+    String sectionTitle = 'SELECTED WARDROBE',
+    bool showGarmentPrices = true,
+  }) {
     final garmentCount =
         wardrobeItems.fold<int>(0, (sum, item) => sum + item.quantity);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildSectionHeader('SELECTED WARDROBE', '1 Item'),
+        _buildSectionHeader(
+          sectionTitle,
+          '$garmentCount Item${garmentCount == 1 ? '' : 's'}',
+        ),
         SizedBox(height: 16.h),
         _buildWardrobeKitSummaryCard(
           state: state,
           items: wardrobeItems,
           garmentCount: garmentCount,
+          isExpanded: isExpanded,
+          onToggle: onToggle,
         ),
-        if (_wardrobeGarmentsExpanded) ...[
+        if (isExpanded) ...[
           SizedBox(height: 24.h),
           _buildSectionHeader(
             'SELECTED GARMENTS',
-            '${wardrobeItems.length} Item${wardrobeItems.length == 1 ? '' : 's'}',
+            '$garmentCount Item${garmentCount == 1 ? '' : 's'}',
           ),
           SizedBox(height: 16.h),
           ...wardrobeItems.map(
             (item) => _buildCartItem(
               context,
               item,
+              state: state,
               isWardrobe: true,
-              // Non-sub kit garments show unit prices; subscription kits stay free-looking.
-              showPrice: !CheckoutSession.instance.useSubscriptionBooking,
+              showPrice: showGarmentPrices,
             ),
           ),
         ],
@@ -443,9 +655,11 @@ class _CartScreenState extends State<CartScreen> {
     required CartState state,
     required List<CartItem> items,
     required int garmentCount,
+    required bool isExpanded,
+    required VoidCallback onToggle,
   }) {
     return GestureDetector(
-      onTap: () => setState(() => _wardrobeGarmentsExpanded = !_wardrobeGarmentsExpanded),
+      onTap: onToggle,
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -476,7 +690,7 @@ class _CartScreenState extends State<CartScreen> {
           Padding(
             padding: EdgeInsets.only(top: 4.h),
             child: AnimatedRotation(
-              turns: _wardrobeGarmentsExpanded ? 0.5 : 0,
+              turns: isExpanded ? 0.5 : 0,
               duration: const Duration(milliseconds: 200),
               child: Icon(
                 Icons.keyboard_arrow_down,
@@ -496,7 +710,7 @@ class _CartScreenState extends State<CartScreen> {
         .take(4)
         .toList();
     while (images.length < 4) {
-      images.add(images.isNotEmpty ? images.last : ImageConstant.comfortWearImg1);
+      images.add(images.isNotEmpty ? images.last : '');
     }
 
     Widget cell(String url, {BorderRadius? radius}) {
@@ -511,53 +725,62 @@ class _CartScreenState extends State<CartScreen> {
       );
     }
 
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: SizedBox(
-        width: 88.w,
-        height: 88.w,
-        child: Column(
-          children: [
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: cell(
-                      images[0],
-                      radius: const BorderRadius.only(topLeft: Radius.circular(8)),
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: AppColours.primary,
+          width: 1.2,
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(9),
+        child: SizedBox(
+          width: 88.w,
+          height: 88.w,
+          child: Column(
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: cell(
+                        images[0],
+                        radius: const BorderRadius.only(topLeft: Radius.circular(8)),
+                      ),
                     ),
-                  ),
-                  SizedBox(width: 2),
-                  Expanded(
-                    child: cell(
-                      images[1],
-                      radius: const BorderRadius.only(topRight: Radius.circular(8)),
+                    SizedBox(width: 2),
+                    Expanded(
+                      child: cell(
+                        images[1],
+                        radius: const BorderRadius.only(topRight: Radius.circular(8)),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-            SizedBox(height: 2),
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: cell(
-                      images[2],
-                      radius: const BorderRadius.only(bottomLeft: Radius.circular(8)),
+              SizedBox(height: 2),
+              Expanded(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: cell(
+                        images[2],
+                        radius: const BorderRadius.only(bottomLeft: Radius.circular(8)),
+                      ),
                     ),
-                  ),
-                  SizedBox(width: 2),
-                  Expanded(
-                    child: cell(
-                      images[3],
-                      radius: const BorderRadius.only(bottomRight: Radius.circular(8)),
+                    SizedBox(width: 2),
+                    Expanded(
+                      child: cell(
+                        images[3],
+                        radius: const BorderRadius.only(bottomRight: Radius.circular(8)),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -566,113 +789,14 @@ class _CartScreenState extends State<CartScreen> {
   Widget _buildCartItem(
     BuildContext context,
     CartItem item, {
+    required CartState state,
     bool isWardrobe = false,
     bool? showPrice,
   }) {
-    final shouldShowPrice = showPrice ?? !isWardrobe;
-    final priceLabel = shouldShowPrice ? _formatCartItemPrice(item) : null;
-
-    return Container(
-      margin: EdgeInsets.only(bottom: 16.h),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          GestureDetector(
-            onTap: () => _openProductDetails(context, item),
-            child: ProductImage(
-              imageUrl: item.imageUrl,
-              width: 70.w,
-              height: 85.h,
-              fit: BoxFit.cover,
-              borderRadius: BorderRadius.circular(8),
-            ),
-          ),
-          SizedBox(width: 16.w),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: () => _openProductDetails(context, item),
-                        behavior: HitTestBehavior.opaque,
-                        child: Text(
-                          item.title,
-                          style: CustomTextStyles.montserratSemiBold.copyWith(color: AppColours.primary,fontSize: 14),
-                        ),
-                      ),
-                    ),
-                    GestureDetector(
-                      onTap: () => context
-                          .read<CartBloc>()
-                          .add(RemoveFromCartEvent(item.id)),
-                      child: Icon(
-                        Icons.delete_outline,
-                        color: Colors.white54,
-                        size: 22,
-                      ),
-                    ),
-                  ],
-                ),
-                if (priceLabel != null) ...[
-                  SizedBox(height: 4.h),
-                  Text(
-                    priceLabel,
-                    style: TextStyle(
-                      color: AppColours.primary,
-                      fontSize: 14.fSize,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-                SizedBox(height: 10.h),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _buildDropdownChip(
-                        value: item.selectedSize,
-                        items: {
-                          ..._allSizes,
-                          item.selectedSize,
-                        }.toList(),
-                        prefix: 'Size: ',
-                        onChanged: (val) {
-                          if (val != null) {
-                            context
-                                .read<CartBloc>()
-                                .add(UpdateCartItemSizeEvent(item.id, val));
-                          }
-                        },
-                      ),
-                    ),
-                    SizedBox(width: 8.w),
-                    Expanded(
-                      child: _buildDropdownChip<int>(
-                        value: item.quantity,
-                        items: {
-                          ..._qtyOptions,
-                          item.quantity,
-                        }.toList()
-                          ..sort(),
-                        prefix: 'Qty: ',
-                        onChanged: (val) {
-                          if (val != null) {
-                            context
-                                .read<CartBloc>()
-                                .add(UpdateCartItemQuantityEvent(item.id, val));
-                          }
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+    return ReusableProductCartItem(
+      item: item,
+      state: state,
+      showPrice: showPrice ?? !isWardrobe,
     );
   }
 
@@ -697,6 +821,7 @@ class _CartScreenState extends State<CartScreen> {
           value: value,
           isDense: true,
           isExpanded: true,
+          menuMaxHeight: 220.h,
           dropdownColor: AppColours.secondary,
           icon: Icon(Icons.arrow_drop_down,
               color: Colors.black, size: 18),
@@ -720,20 +845,34 @@ class _CartScreenState extends State<CartScreen> {
     );
   }
 
+  Widget _buildCartLoading() {
+    return const Center(
+      child: SizedBox(
+        width: 28,
+        height: 28,
+        child: CircularProgressIndicator(
+          strokeWidth: 2.5,
+          color: Color(0xFFE6C27A),
+        ),
+      ),
+    );
+  }
+
   Widget _buildEmptyCart() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.shopping_cart_outlined,
-              color: AppColours.primary.withOpacity(0.5), size: 64),
-          SizedBox(height: 16.h),
-          Text(
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: [
+        SizedBox(height: 160.h),
+        Icon(Icons.shopping_cart_outlined,
+            color: AppColours.primary.withOpacity(0.5), size: 64),
+        SizedBox(height: 16.h),
+        Center(
+          child: Text(
             'Your cart is empty',
             style: TextStyle(color: Colors.white, fontSize: 18.fSize),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
@@ -915,9 +1054,11 @@ class _CartScreenState extends State<CartScreen> {
   }
 
   bool _isSubscriptionWardrobeBooking(CartState state) {
-    if (state.wardrobeItems.isEmpty || state.essentialItems.isNotEmpty) {
-      return false;
-    }
+    if (state.wardrobeItems.isEmpty) return false;
+    if (state.essentialItems.isNotEmpty) return false;
+    if (state.hasPaidRentalGarments) return false;
+    if (state.hasMixedWardrobeTypes) return false;
+    if (CheckoutSession.instance.continueWithoutMembership) return false;
     return CheckoutSession.instance.useSubscriptionBooking;
   }
 
@@ -928,27 +1069,36 @@ class _CartScreenState extends State<CartScreen> {
 
     setState(() => _isPreparingCheckout = true);
     try {
-      if (_isSubscriptionWardrobeBooking(state)) {
-        if (!context.mounted) return;
+      final bloc = context.read<CartBloc>();
+      final remoteCart = await bloc.refresh(source: 'CartScreen.checkout');
+      if (!context.mounted) return;
+      if (remoteCart.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Your cart is empty')),
+        );
+        return;
+      }
+
+      if (_isSubscriptionWardrobeBooking(bloc.state)) {
         Navigator.pushNamed(context, AppRoutes.essentialsCheckoutScreen);
         return;
       }
 
-      final checkoutType = state.wardrobeItems.isNotEmpty ? 'kit' : 'essentials';
-      final hasEssentials = state.essentialItems.isNotEmpty;
-
-      // Sync local qty/size to server before building checkout totals.
-      final remoteCart = await _cartRepository.syncCartState(state);
+      final stateAfterRefresh = bloc.state;
+      final initiateReq = CheckoutInitiateRequest.fromCart(stateAfterRefresh);
       final initiate = await _orderRepository.initiateOrder(
-        checkoutType: checkoutType,
-        nonSubscription: true,
-        productClass: hasEssentials ? 'single_item' : 'wardrobe_kit',
-        wardrobeKitId: state.wardrobeItems.isNotEmpty
-            ? (state.wardrobeKitProductId ?? state.wardrobeKitId)
-            : null,
+        checkoutType: initiateReq.checkoutType,
+        nonSubscription: initiateReq.nonSubscription,
+        productClass: initiateReq.productClass,
+        wardrobeKitId: initiateReq.wardrobeKitId,
       );
 
       if (!context.mounted) return;
+
+      if (initiate.isFreeSubscriptionBooking && initiate.orderId.isNotEmpty) {
+        Navigator.pushNamed(context, AppRoutes.essentialsCheckoutScreen);
+        return;
+      }
 
       if (!initiate.canOpenRazorpay) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -963,11 +1113,9 @@ class _CartScreenState extends State<CartScreen> {
         return;
       }
 
-      final latestState = context.read<CartBloc>().state;
+      final latestState = bloc.state;
       final snapshot = CheckoutPricing.payableSnapshot(
-        remoteCart: remoteCart.isEmpty
-            ? await _cartRepository.getCart()
-            : remoteCart,
+        remoteCart: remoteCart,
         initiate: initiate,
         cartState: latestState,
       );

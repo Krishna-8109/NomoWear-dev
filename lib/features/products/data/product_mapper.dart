@@ -1,4 +1,3 @@
-import 'package:nomowear/core/utils/image_constant.dart';
 import 'package:nomowear/features/products/data/models/product.dart';
 import 'package:nomowear/features/products/data/product_catalog.dart';
 import 'package:nomowear/features/products/data/models/product_variant.dart';
@@ -11,15 +10,9 @@ class ProductMapper {
     Product product, {
     String? category,
   }) {
-    final listingCategory = category ??
-        (ProductCatalog.isKidsProduct(product)
-            ? 'Kids Wardrobe'
-            : ProductCatalog.isEssentialsProduct(product)
-                ? 'Essentials Wardrobe'
-                : product.categoryName);
+    final listingCategory = category ?? product.categoryName;
     final images = _productImages(product);
-    final imageUrl =
-        images.isNotEmpty ? images.first : ImageConstant.comfortWearImg7;
+    final imageUrl = images.isNotEmpty ? images.first : '';
     final variantInfo = _extractVariantInfo(product, images);
     final isKids = ProductCatalog.isKidsProduct(product) ||
         (listingCategory?.toLowerCase().contains('kids') ?? false);
@@ -30,6 +23,8 @@ class ProductMapper {
       description: _descriptionFor(product),
       imageUrl: imageUrl,
       price: _formatPrice(product.actualPrice),
+      costPrice: product.costPrice != null ? _formatPrice(product.costPrice!) : _formatPrice(product.actualPrice),
+      actualPrice: _formatPrice(product.actualPrice),
       colorVariantImages: variantInfo.colorImages,
       colorNames: variantInfo.colorNames,
       sizes: variantInfo.sizes,
@@ -39,6 +34,8 @@ class ProductMapper {
       category: listingCategory,
       imageUrls: images,
       variants: product.variants,
+      stockStatus: product.stockStatus,
+      itemType: product.itemType,
     );
   }
 
@@ -51,12 +48,7 @@ class ProductMapper {
   }
 
   static String _descriptionFor(Product product) {
-    final slug = product.productSlug.replaceAll('-', ' ').trim();
-    if (slug.isNotEmpty &&
-        slug.toLowerCase() != product.productName.toLowerCase()) {
-      return slug;
-    }
-    return product.productName;
+    return product.displayDescription ?? '';
   }
 
   static String formatPrice(String actualPrice) => _formatPrice(actualPrice);
@@ -82,14 +74,6 @@ class ProductMapper {
       product.attributes.forEach((key, value) {
         details.add('$key: $value');
       });
-    }
-    if (details.isEmpty) {
-      return const [
-        'Fabric: Cotton',
-        'Fit: Slim Fit',
-        'Stretchable',
-        'Length: Regular',
-      ];
     }
     return details;
   }
@@ -205,6 +189,27 @@ class ProductMapper {
     ).hasMatch(value.trim());
   }
 
+  static String? optionValue(ProductVariant variant, String key) {
+    for (final entry in variant.options.entries) {
+      if (entry.key.toLowerCase() == key.toLowerCase()) {
+        return entry.value.trim();
+      }
+    }
+    final name = variant.variantName;
+    if (name.isNotEmpty) {
+      final parts = name.split('/');
+      for (final part in parts) {
+        final kv = part.split(':');
+        if (kv.length >= 2) {
+          if (kv[0].trim().toLowerCase() == key.toLowerCase()) {
+            return kv.sublist(1).join(':').trim();
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   static ProductVariant? matchingVariant({
     required List<ProductVariant> variants,
     String? selectedColor,
@@ -212,21 +217,14 @@ class ProductMapper {
   }) {
     if (variants.isEmpty) return null;
 
-    String? optionValue(Map<String, String> options, String key) {
-      for (final entry in options.entries) {
-        if (entry.key.toLowerCase() == key.toLowerCase()) {
-          return entry.value.trim();
-        }
-      }
-      return null;
-    }
+
 
     final wantedColor = selectedColor?.trim().toUpperCase();
     final wantedSize = selectedSize.trim().toUpperCase();
 
     for (final variant in variants) {
-      final color = optionValue(variant.options, 'Color')?.toUpperCase();
-      final size = optionValue(variant.options, 'Size')?.toUpperCase();
+      final color = optionValue(variant, 'Color')?.toUpperCase();
+      final size = optionValue(variant, 'Size')?.toUpperCase();
 
       final colorMatches = wantedColor == null ||
           wantedColor.isEmpty ||
@@ -238,20 +236,55 @@ class ProductMapper {
 
     // Fallback 1: keep size, ignore color.
     for (final variant in variants) {
-      final size = optionValue(variant.options, 'Size')?.toUpperCase();
+      final size = optionValue(variant, 'Size')?.toUpperCase();
       if (size == wantedSize) return variant;
     }
 
     // Fallback 2: keep color, ignore size.
     if (wantedColor != null && wantedColor.isNotEmpty) {
       for (final variant in variants) {
-        final color = optionValue(variant.options, 'Color')?.toUpperCase();
+        final color = optionValue(variant, 'Color')?.toUpperCase();
         if (color == wantedColor) return variant;
       }
     }
 
     return variants.first;
   }
+
+  static ResolvedPrice resolvePrice(WardrobeItem item, {ProductVariant? variant}) {
+    String rawActual;
+    String rawDiscounted;
+
+    if (variant != null) {
+      rawActual = variant.actualPrice;
+      rawDiscounted = variant.costPrice ?? variant.actualPrice;
+    } else {
+      rawActual = item.actualPrice ?? item.price ?? '0';
+      rawDiscounted = item.costPrice ?? item.price ?? '0';
+    }
+
+    return ResolvedPrice(
+      actualPrice: _formatPrice(rawActual),
+      discountedPrice: _formatPrice(rawDiscounted),
+    );
+  }
+}
+
+class ResolvedPrice {
+  final String actualPrice;
+  final String discountedPrice;
+
+  const ResolvedPrice({
+    required this.actualPrice,
+    required this.discountedPrice,
+  });
+
+  bool get hasDiscount =>
+      actualPrice != discountedPrice &&
+      discountedPrice != '₹ 0' &&
+      discountedPrice != '₹0' &&
+      discountedPrice != '₹ 0.00' &&
+      discountedPrice != '₹0.00';
 }
 
 class _VariantInfo {

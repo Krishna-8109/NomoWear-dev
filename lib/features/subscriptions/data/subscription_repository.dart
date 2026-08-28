@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:nomowear/core/network/api_client.dart';
 import 'package:nomowear/core/network/api_constants.dart';
 import 'package:nomowear/core/network/api_exception.dart';
@@ -24,6 +25,15 @@ class SubscriptionRepository {
   final ApiClient _apiClient;
   final AuthStorage _authStorage;
   final ProfileRepository _profileRepository;
+
+  void _logSource(String source, {String? note}) {
+    if (!kDebugMode) return;
+    debugPrint('[SUBSCRIPTION_SOURCE]');
+    debugPrint('source=$source');
+    if (note != null && note.isNotEmpty) {
+      debugPrint('note=$note');
+    }
+  }
 
   /// Returns all subscriptions (current + history) for the logged-in customer.
   Future<List<ActiveSubscription>> getMySubscriptions() async {
@@ -71,9 +81,15 @@ class SubscriptionRepository {
   Future<ActiveSubscription?> getActiveSubscription({
     bool forceRefresh = false,
   }) async {
+    if (kDebugMode && forceRefresh) {
+      debugPrint('[SUBSCRIPTION_REFRESH] START');
+    }
     if (!forceRefresh) {
       final cached = SubscriptionCache.instance.activeSubscription;
-      if (cached != null) return cached;
+      if (cached != null) {
+        _logSource('cache', note: 'getActiveSubscription(forceRefresh=false)');
+        return cached;
+      }
     }
 
     final authToken = await _authStorage.getAuthToken();
@@ -87,12 +103,37 @@ class SubscriptionRepository {
         authToken: authToken,
       );
 
+      if (kDebugMode) {
+        debugPrint('[ACTIVE_SUBSCRIPTION_API] raw=$json');
+      }
+
       final subscription = _parseActiveSubscriptionResponse(json);
+      if (kDebugMode) {
+        debugPrint(
+          '[ACTIVE_SUBSCRIPTION_PARSED] '
+          'id=${subscription?.id} status=${subscription?.planStatus} '
+          'noOfBookings=${subscription?.noOfBookings} '
+          'bookingsUsed=${subscription?.bookingsUsed} '
+          'remainingBookings=${subscription?.remainingBookings} '
+          'maxGarments=${subscription?.maxGarments} '
+          'usedGarments=${subscription?.usedGarments} '
+          'remainingGarments=${subscription?.remainingGarments} '
+          'exhausted=${subscription?.isBookingLimitExhausted}',
+        );
+      }
       SubscriptionCache.instance.setActiveSubscription(subscription);
+      _logSource('backend');
+      if (kDebugMode && forceRefresh) {
+        debugPrint('[SUBSCRIPTION_REFRESH] COMPLETE');
+      }
       return subscription;
     } on ApiException catch (e) {
       if (e.statusCode == 404) {
         SubscriptionCache.instance.clear();
+        _logSource('backend', note: 'active subscription not found (404)');
+        if (kDebugMode && forceRefresh) {
+          debugPrint('[SUBSCRIPTION_REFRESH] COMPLETE');
+        }
         return null;
       }
       rethrow;
@@ -150,6 +191,7 @@ class SubscriptionRepository {
     required String planRef,
     required String billingPeriod,
     String? planId,
+    int? amount,
   }) async {
     final authToken = await _authStorage.getAuthToken();
     if (authToken == null || authToken.isEmpty) {
@@ -161,13 +203,18 @@ class SubscriptionRepository {
       throw const ApiException('Plan reference is missing. Please reselect a plan.');
     }
 
+    final body = <String, dynamic>{
+      'planRef': resolvedPlanId,
+      'planId': resolvedPlanId,
+      'billingPeriod': billingPeriod,
+    };
+    if (amount != null && amount > 0) {
+      body['amount'] = amount;
+    }
+
     final json = await _apiClient.post(
       ApiConstants.subscriptionsCreateOrderPath,
-      {
-        'planRef': resolvedPlanId,
-        'planId': resolvedPlanId,
-        'billingPeriod': billingPeriod,
-      },
+      body,
       authToken: authToken,
     );
 
