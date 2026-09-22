@@ -17,14 +17,17 @@ class ProductMapper {
     final isKids = ProductCatalog.isKidsProduct(product) ||
         (listingCategory?.toLowerCase().contains('kids') ?? false);
 
+    final prices = resolveProductPrice(product);
     return WardrobeItem(
       productId: product.id,
       title: product.productName,
       description: _descriptionFor(product),
       imageUrl: imageUrl,
-      price: _formatPrice(product.actualPrice),
-      costPrice: product.costPrice != null ? _formatPrice(product.costPrice!) : _formatPrice(product.actualPrice),
-      actualPrice: _formatPrice(product.actualPrice),
+      // Selling / discounted price from backend `actual_price`.
+      price: prices.discountedPrice,
+      // Keep raw backend amounts so resolvePrice can re-evaluate per variant.
+      costPrice: product.costPrice,
+      actualPrice: product.actualPrice,
       colorVariantImages: variantInfo.colorImages,
       colorNames: variantInfo.colorNames,
       sizes: variantInfo.sizes,
@@ -53,14 +56,74 @@ class ProductMapper {
 
   static String formatPrice(String actualPrice) => _formatPrice(actualPrice);
 
-  static String _formatPrice(String actualPrice) {
-    final parsed = double.tryParse(actualPrice);
-    if (parsed == null) return '₹ $actualPrice';
+  /// Parses backend / display price strings (e.g. `"349.00"`, `"₹ 349"`).
+  static double? parseAmount(String? raw) {
+    if (raw == null) return null;
+    final cleaned = raw.replaceAll(RegExp(r'[^\d.]'), '').trim();
+    if (cleaned.isEmpty) return null;
+    return double.tryParse(cleaned);
+  }
+
+  static String _formatPrice(String raw) {
+    final parsed = parseAmount(raw);
+    if (parsed == null) return '₹ 0';
     if (parsed == parsed.roundToDouble()) {
       return '₹ ${parsed.round()}';
     }
-    return '₹ $actualPrice';
+    return '₹ ${parsed.toStringAsFixed(2)}';
   }
+
+  /// Backend price semantics for product / variant payloads:
+  /// - [actualPrice] (`actual_price`) = final / discounted selling price
+  /// - [costPrice] (`cost_price`) = original / compare-at price when higher
+  ///
+  /// [ResolvedPrice.discountedPrice] is always the customer-facing selling price.
+  /// [ResolvedPrice.actualPrice] is the original price (for strikethrough) when
+  /// a discount applies; otherwise it matches the selling price.
+  static ResolvedPrice resolveRawPrices({
+    required String? actualPrice,
+    String? costPrice,
+  }) {
+    final selling = parseAmount(actualPrice);
+    final original = parseAmount(costPrice);
+
+    if (selling != null && selling > 0) {
+      final showOriginal =
+          original != null && original > 0 && original > selling;
+      return ResolvedPrice(
+        discountedPrice: _formatPrice(selling.toString()),
+        actualPrice: showOriginal
+            ? _formatPrice(original.toString())
+            : _formatPrice(selling.toString()),
+      );
+    }
+
+    // No valid discounted/selling `actual_price` → fall back to cost_price.
+    if (original != null && original > 0) {
+      final formatted = _formatPrice(original.toString());
+      return ResolvedPrice(
+        discountedPrice: formatted,
+        actualPrice: formatted,
+      );
+    }
+
+    return const ResolvedPrice(
+      discountedPrice: '₹ 0',
+      actualPrice: '₹ 0',
+    );
+  }
+
+  static ResolvedPrice resolveProductPrice(Product product) =>
+      resolveRawPrices(
+        actualPrice: product.actualPrice,
+        costPrice: product.costPrice,
+      );
+
+  static ResolvedPrice resolveVariantPrice(ProductVariant variant) =>
+      resolveRawPrices(
+        actualPrice: variant.actualPrice,
+        costPrice: variant.costPrice,
+      );
 
   static List<String> _productDetailsFor(Product product) {
     final details = <String>[];
@@ -252,26 +315,21 @@ class ProductMapper {
   }
 
   static ResolvedPrice resolvePrice(WardrobeItem item, {ProductVariant? variant}) {
-    String rawActual;
-    String rawDiscounted;
-
     if (variant != null) {
-      rawActual = variant.actualPrice;
-      rawDiscounted = variant.costPrice ?? variant.actualPrice;
-    } else {
-      rawActual = item.actualPrice ?? item.price ?? '0';
-      rawDiscounted = item.costPrice ?? item.price ?? '0';
+      return resolveVariantPrice(variant);
     }
-
-    return ResolvedPrice(
-      actualPrice: _formatPrice(rawActual),
-      discountedPrice: _formatPrice(rawDiscounted),
+    return resolveRawPrices(
+      actualPrice: item.actualPrice ?? item.price,
+      costPrice: item.costPrice,
     );
   }
 }
 
 class ResolvedPrice {
+  /// Original / compare-at price (strikethrough when [hasDiscount] is true).
   final String actualPrice;
+
+  /// Final selling / discounted price shown as the primary price.
   final String discountedPrice;
 
   const ResolvedPrice({
@@ -279,12 +337,13 @@ class ResolvedPrice {
     required this.discountedPrice,
   });
 
-  bool get hasDiscount =>
-      actualPrice != discountedPrice &&
-      discountedPrice != '₹ 0' &&
-      discountedPrice != '₹0' &&
-      discountedPrice != '₹ 0.00' &&
-      discountedPrice != '₹0.00';
+  bool get hasDiscount {
+    final selling = ProductMapper.parseAmount(discountedPrice);
+    final original = ProductMapper.parseAmount(actualPrice);
+    if (selling == null || selling <= 0) return false;
+    if (original == null || original <= 0) return false;
+    return original > selling;
+  }
 }
 
 class _VariantInfo {

@@ -73,6 +73,10 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
   @override
   void initState() {
     super.initState();
+    final savedNote = CheckoutSession.instance.orderNote;
+    if (savedNote != null && savedNote.isNotEmpty) {
+      _noteController.text = savedNote;
+    }
     final initial = widget.initialPrefetch;
     if (initial != null) {
       _payableSnapshot = initial.snapshot;
@@ -212,6 +216,7 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
     OrdersCache.instance.clear();
     userOrdersList.clear();
     CheckoutSession.instance.clearDeliveryDetails();
+    CheckoutSession.instance.clearOrderNote();
     CheckoutSession.instance.clearWardrobeCategoryLock();
     // Reset temporary booking-mode flags so the next Home visit shows fresh
     // subscription options instead of locking into the previous flow.
@@ -404,13 +409,21 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
   }
 
   Future<InitiateOrderResult> _initiateCheckoutOrder(CartState state) async {
+    final note = _currentOrderNote();
+    CheckoutSession.instance.setOrderNote(note);
     final req = CheckoutInitiateRequest.fromCart(state);
     return _orderRepository.initiateOrder(
       checkoutType: req.checkoutType,
       nonSubscription: req.nonSubscription,
       productClass: req.productClass,
       wardrobeKitId: req.wardrobeKitId,
+      orderNote: note,
     );
+  }
+
+  String? _currentOrderNote() {
+    final note = _noteController.text.trim();
+    return note.isEmpty ? null : note;
   }
 
   bool _canProceedToPaymentFor(CartState state) {
@@ -502,11 +515,14 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
 
         final wardrobeKitId =
             state.wardrobeKitProductId ?? state.wardrobeKitId;
+        final note = _currentOrderNote();
+        CheckoutSession.instance.setOrderNote(note);
         final bookingResult = await _orderRepository.initiateOrder(
           checkoutType: 'kit',
           nonSubscription: false,
           productClass: 'wardrobe_kit',
           wardrobeKitId: wardrobeKitId,
+          orderNote: note,
         );
 
         if (!mounted) return;
@@ -555,28 +571,45 @@ class _EssentialsCheckoutScreenState extends State<EssentialsCheckoutScreen> {
         return;
       }
 
-      // CHANGE: Reuse preloaded initiate-order snapshot (same amount as UI summary).
-      final fingerprint = CheckoutPricing.cartFingerprint(state);
-      if (_payableSnapshot == null ||
-          _payableCartFingerprint != fingerprint ||
-          !_payableSnapshot!.initiate.canOpenRazorpay) {
-        await _loadAuthoritativePayable(state);
-      }
+      // Re-initiate with the latest order note before payment.
+      final note = _currentOrderNote();
+      CheckoutSession.instance.setOrderNote(note);
+      final req = CheckoutInitiateRequest.fromCart(state);
+      final freshInitiate = await _orderRepository.initiateOrder(
+        checkoutType: req.checkoutType,
+        nonSubscription: req.nonSubscription,
+        productClass: req.productClass,
+        wardrobeKitId: req.wardrobeKitId,
+        orderNote: note,
+      );
 
-      final snapshot = _payableSnapshot;
-      if (snapshot == null || !snapshot.initiate.canOpenRazorpay) {
-        if (!mounted) return;
+      if (!mounted) return;
+      if (!freshInitiate.canOpenRazorpay) {
         setState(() => _isPlacingOrder = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(
-              _payableError ??
-                  'Unable to start payment. Please try again.',
+              freshInitiate.requiresPayment
+                  ? 'Payment details missing from server. Please try again.'
+                  : 'Unable to start payment. Please try again.',
             ),
           ),
         );
         return;
       }
+
+      final remoteCart = await context.read<CartBloc>().refresh(
+            source: 'EssentialsCheckout.placeOrder',
+          );
+      if (!mounted) return;
+
+      final snapshot = CheckoutPricing.payableSnapshot(
+        remoteCart: remoteCart.isEmpty
+            ? const RemoteCart(id: '', items: [])
+            : remoteCart,
+        initiate: freshInitiate,
+        cartState: state,
+      );
 
       setState(() => _isPlacingOrder = false);
       await _openRazorpayForSnapshot(snapshot, state);

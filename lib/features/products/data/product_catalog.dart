@@ -8,8 +8,8 @@ class ProductCatalog {
     'Comfort wardrobe',
     'Professional wardrobe',
     'Premium wardrobe',
-    'Kids wardrobe',
-    'Essentials wardrobe',
+    'Kidswardrobe',
+    'Essentialswardrobe',
   ];
 
   /// Non-essentials tabs used for category-lock matching only — not card inventory.
@@ -24,14 +24,14 @@ class ProductCatalog {
   static bool isKidsProduct(Product product) {
     if (!product.isSingleItem) return false;
     final category = product.categoryName?.toLowerCase() ?? '';
-    return category == 'kids wardrobe' || category.contains('kids');
+    return category == 'kidswardrobe' || category.contains('kids');
   }
 
   static bool isEssentialsProduct(Product product) {
     if (!product.isSingleItem) return false;
     final cat = product.categoryName?.toLowerCase() ?? '';
     return cat == 'essentials' ||
-        cat == 'essentials wardrobe' ||
+        cat == 'essentialswardrobe' ||
         cat.contains('essentials');
   }
 
@@ -48,13 +48,26 @@ class ProductCatalog {
       if (needle == tab.toLowerCase()) return tab;
     }
 
+    // "Kids Essentials" / any essentials label must map to Essentialswardrobe,
+    // not Kidswardrobe (which also matches the substring "kids").
+    if (needle.contains('essential')) {
+      for (final tab in wardrobeApiTabs) {
+        if (isEssentialsTab(tab)) return tab;
+      }
+    }
+
+    // Prefer the longest core match (e.g. "professional" over shorter cores).
+    String? best;
+    var bestLen = -1;
     for (final tab in wardrobeApiTabs) {
       final core = tab.toLowerCase().replaceAll('wardrobe', '').trim();
       if (core.isEmpty) continue;
-      if (needle.contains(core)) return tab;
+      if (needle.contains(core) && core.length > bestLen) {
+        best = tab;
+        bestLen = core.length;
+      }
     }
-
-    return null;
+    return best;
   }
 
   /// One Home card from a tab response. Empty `data` → no card.
@@ -76,7 +89,7 @@ class ProductCatalog {
       if (category == needle) return kit;
     }
 
-    final normalized = needle.replaceAll(' wardrobe', '').trim();
+    final normalized = needle.replaceAll('wardrobe', '').trim();
     if (normalized.isNotEmpty) {
       for (final kit in kits) {
         final name = kit.productName.toLowerCase();
@@ -120,67 +133,54 @@ class ProductCatalog {
     return resolved;
   }
 
+  /// Products for a wardrobe listing screen.
+  ///
+  /// The repository already requests products with the correct `tab`. Do not
+  /// re-filter by `product_class` / `category_name` here — that silently drops
+  /// valid API products (Comfort Wear, Kids, Essentials, etc.).
   static List<Product> wardrobeListingItems(
     List<Product> products,
     String category,
   ) {
-    final tab = apiTabForCategory(category);
-    final isEssentials = tab != null
-        ? isEssentialsTab(tab)
-        : category.toLowerCase().contains('essential');
-    final isKids = tab != null
-        ? tab.toLowerCase().contains('kids')
-        : category.toLowerCase().contains('kids');
-
-    if (isEssentials) {
-      final items = essentialsItems(products);
-      if (items.isNotEmpty) return items;
-      return _nonKitProducts(products);
-    }
-
-    if (isKids) {
-      // Kids Wear should display both single items and Wardrobe Kits (e.g. 'Kids Wardrobe')
-      final items = products.where((p) {
-        final cat = p.categoryName?.toLowerCase() ?? '';
-        final isKidsCat = cat == 'kids wardrobe' || cat.contains('kids');
-        return isKidsCat || isKidsProduct(p);
-      }).toList(growable: false);
-      
-      if (items.isNotEmpty) return items;
-      return products;
-    }
-
-    final isProfessional = tab != null
-        ? tab.toLowerCase().contains('professional')
-        : category.toLowerCase().contains('professional');
-
-    if (isProfessional) {
-      return products;
-    }
-
-    final singles = products.where((p) => p.isSingleItem).toList(growable: false);
-    if (singles.isNotEmpty) return singles;
-
-    Product? kit = findWardrobeKit(products, category);
-    if (kit == null) {
-      for (final product in products) {
-        if (product.isWardrobeKit) {
-          kit = product;
-          break;
-        }
+    final kept = <Product>[];
+    for (final product in products) {
+      if (product.id.trim().isEmpty) {
+        _logListingFilterDrop(
+          category: category,
+          productId: product.id,
+          productName: product.productName,
+          reason: 'empty_product_id',
+        );
+        continue;
       }
+      if (product.productName.trim().isEmpty) {
+        _logListingFilterDrop(
+          category: category,
+          productId: product.id,
+          productName: product.productName,
+          reason: 'empty_product_name',
+        );
+        continue;
+      }
+      kept.add(product);
     }
-    if (kit != null) {
-      final items = kitListingItems(kit, products);
-      if (items.isNotEmpty) return items;
-    }
-
-    return _nonKitProducts(products);
-
+    return kept;
   }
 
-  static List<Product> _nonKitProducts(List<Product> products) {
-    return products.where((p) => !p.isWardrobeKit).toList(growable: false);
+  static void _logListingFilterDrop({
+    required String category,
+    required String productId,
+    required String productName,
+    required String reason,
+  }) {
+    assert(() {
+      // ignore: avoid_print
+      print(
+        '[PRODUCT_LIST_FILTER] category=$category '
+        'productId=$productId productName=$productName reason=$reason',
+      );
+      return true;
+    }());
   }
 
   static String wardrobeDisplayCategory(Product kit) {

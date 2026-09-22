@@ -33,6 +33,8 @@ class CheckoutSession {
   String? wardrobeCategory;
   /// Stable Home category ID for the active unpaid non-subscription booking.
   String? activeNonSubscriptionCategoryId;
+  /// Runtime-only delivery note for the current checkout (not persisted).
+  String? orderNote;
   bool _didRestore = false;
   Future<void>? _restoreFuture;
 
@@ -165,7 +167,17 @@ class CheckoutSession {
     gender = null;
     bodyType = null;
     kitType = null;
+    orderNote = null;
     _persist();
+  }
+
+  void setOrderNote(String? note) {
+    final trimmed = note?.trim();
+    orderNote = (trimmed == null || trimmed.isEmpty) ? null : trimmed;
+  }
+
+  void clearOrderNote() {
+    orderNote = null;
   }
 
   void clear() {
