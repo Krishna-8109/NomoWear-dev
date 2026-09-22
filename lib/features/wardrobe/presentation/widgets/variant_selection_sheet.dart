@@ -214,7 +214,7 @@ class _VariantSelectionSheetState extends State<VariantSelectionSheet> {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
-                    '₹${variant.actualPrice}',
+                    ProductMapper.resolveVariantPrice(variant).discountedPrice,
                     style: CustomTextStyles.montserratBold.copyWith(
                       fontSize: 16,
                       color: AppColours.primary,

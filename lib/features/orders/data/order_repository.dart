@@ -122,6 +122,7 @@ class OrderRepository {
     String? addressId,
     String? deliveryDate,
     String? deliveryTime,
+    String? orderNote,
   }) async {
     final authToken = await _authStorage.getAuthToken();
     if (authToken == null || authToken.isEmpty) {
@@ -156,6 +157,10 @@ class OrderRepository {
     if (resolvedKitId != null && resolvedKitId.isNotEmpty) {
       body['kitId'] = resolvedKitId;
       body['wardrobe_kit_id'] = resolvedKitId;
+    }
+    final trimmedOrderNote = orderNote?.trim();
+    if (trimmedOrderNote != null && trimmedOrderNote.isNotEmpty) {
+      body['order_note'] = trimmedOrderNote;
     }
 
     final json = await _apiClient.post(

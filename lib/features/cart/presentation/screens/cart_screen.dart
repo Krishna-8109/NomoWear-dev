@@ -209,7 +209,13 @@ class _CartScreenState extends State<CartScreen> {
     if (_isPreparingCheckout) return;
     final canProceed = await ProfileOrderGuard.ensureCompleteProfile(context);
     if (!canProceed || !context.mounted) return;
+    CheckoutSession.instance.setOrderNote(_currentOrderNote());
     await _prefetchCheckoutAndNavigate(context);
+  }
+
+  String? _currentOrderNote() {
+    final note = _noteController.text.trim();
+    return note.isEmpty ? null : note;
   }
 
   Widget _buildAppBar(int count) {
@@ -1080,6 +1086,7 @@ class _CartScreenState extends State<CartScreen> {
       }
 
       if (_isSubscriptionWardrobeBooking(bloc.state)) {
+        CheckoutSession.instance.setOrderNote(_currentOrderNote());
         Navigator.pushNamed(context, AppRoutes.essentialsCheckoutScreen);
         return;
       }
@@ -1091,6 +1098,7 @@ class _CartScreenState extends State<CartScreen> {
         nonSubscription: initiateReq.nonSubscription,
         productClass: initiateReq.productClass,
         wardrobeKitId: initiateReq.wardrobeKitId,
+        orderNote: _currentOrderNote(),
       );
 
       if (!context.mounted) return;

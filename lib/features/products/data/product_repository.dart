@@ -19,6 +19,26 @@ class ProductRepository {
   final ApiClient _apiClient;
   final AuthStorage _authStorage;
 
+  /// Pagination metadata from the most recent [getProducts] call.
+  int? lastFetchedPage;
+  int? lastTotalPages;
+  int? lastTotalItems;
+  int? lastRequestedLimit;
+  int lastFetchedCount = 0;
+
+  bool get lastHasNextPage {
+    final page = lastFetchedPage;
+    final totalPages = lastTotalPages;
+    if (page != null && totalPages != null && totalPages > 0) {
+      return page < totalPages;
+    }
+    final limit = lastRequestedLimit;
+    if (limit != null && limit > 0) {
+      return lastFetchedCount >= limit;
+    }
+    return false;
+  }
+
   ProductRepository({
     ApiClient? apiClient,
     AuthStorage? authStorage,
@@ -406,6 +426,12 @@ class ProductRepository {
       }
 
       final products = _parseProductList(json['data']);
+      _capturePaginationMeta(
+        pagination: paginationInfo,
+        page: page,
+        limit: limit,
+        fetchedCount: products.length,
+      );
 
       if (!hasFilters) {
         ProductCache.instance.set(products);
@@ -495,6 +521,41 @@ class ProductRepository {
     return product;
   }
 
+  void _capturePaginationMeta({
+    required dynamic pagination,
+    required int? page,
+    required int? limit,
+    required int fetchedCount,
+  }) {
+    lastFetchedPage = page != null && page > 0 ? page : 1;
+    lastRequestedLimit = limit;
+    lastFetchedCount = fetchedCount;
+
+    int? asInt(dynamic value) {
+      if (value is int) return value;
+      if (value is num) return value.toInt();
+      if (value is String) return int.tryParse(value.trim());
+      return null;
+    }
+
+    if (pagination is Map) {
+      lastTotalPages = asInt(
+        pagination['totalPages'] ??
+            pagination['total_pages'] ??
+            pagination['pages'],
+      );
+      lastTotalItems = asInt(
+        pagination['totalItems'] ??
+            pagination['total_items'] ??
+            pagination['total'] ??
+            pagination['count'],
+      );
+    } else {
+      lastTotalPages = null;
+      lastTotalItems = null;
+    }
+  }
+
   static List<Product> _parseProductList(dynamic data) {
     Iterable raw = const [];
     if (data is List) {
@@ -507,13 +568,33 @@ class ProductRepository {
       if (nested is List) raw = nested;
     }
 
-    return raw
-        .whereType<Map>()
-        .map((e) {
-          final productJson = e['product'] is Map ? e['product'] : e;
-          return Product.fromJson(Map<String, dynamic>.from(productJson));
-        })
-        .where((p) => p.id.isNotEmpty && p.productName.isNotEmpty)
-        .toList();
+    final products = <Product>[];
+    for (final item in raw) {
+      if (item is! Map) continue;
+      final productJson = item['product'] is Map ? item['product'] : item;
+      if (productJson is! Map) continue;
+      final product =
+          Product.fromJson(Map<String, dynamic>.from(productJson));
+      if (product.id.isEmpty) {
+        if (kDebugMode) {
+          debugPrint(
+            '[PRODUCT_PARSE_FILTER] reason=empty_product_id '
+            'productName=${product.productName}',
+          );
+        }
+        continue;
+      }
+      if (product.productName.trim().isEmpty) {
+        if (kDebugMode) {
+          debugPrint(
+            '[PRODUCT_PARSE_FILTER] reason=empty_product_name '
+            'productId=${product.id}',
+          );
+        }
+        continue;
+      }
+      products.add(product);
+    }
+    return products;
   }
 }

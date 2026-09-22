@@ -216,6 +216,7 @@ class WardrobeScreen extends StatefulWidget {
 
 class _WardrobeScreenState extends State<WardrobeScreen> {
   final TextEditingController _searchController = TextEditingController();
+  final ScrollController _scrollController = ScrollController();
   final ProductRepository _productRepository = ProductRepository();
   final AuthStorage _authStorage = AuthStorage();
 
@@ -226,10 +227,15 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
   List<WardrobeItem> _apiItems = [];
   bool _isLoading = true;
   bool _loadFailed = false;
+  bool _isLoadingMore = false;
+  bool _hasNextPage = false;
+  int _currentPage = 1;
+  static const int _pageSize = 20;
 
   @override
   void initState() {
     super.initState();
+    _scrollController.addListener(_onScroll);
     _loadProducts();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -237,19 +243,68 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
     });
   }
 
+  @override
+  void didUpdateWidget(covariant WardrobeScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.category != widget.category) {
+      _resetListingState();
+      _loadProducts(forceRefresh: true);
+    }
+  }
+
+  void _resetListingState() {
+    _apiItems = [];
+    _currentPage = 1;
+    _hasNextPage = false;
+    _isLoadingMore = false;
+    _searchQuery = '';
+    _filterSize = null;
+    _filterGender = null;
+    _selectedIndex = null;
+    _searchController.clear();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    if (_isLoading || _isLoadingMore || !_hasNextPage) return;
+    final position = _scrollController.position;
+    if (position.pixels >= position.maxScrollExtent - 240) {
+      _loadMoreProducts();
+    }
+  }
+
   Future<void> _loadProducts({
     bool forceRefresh = false,
     String? action,
     String? age,
     String? gender,
+    bool loadMore = false,
   }) async {
-    if (mounted) setState(() => _isLoading = true);
+    if (loadMore) {
+      if (_isLoadingMore || !_hasNextPage || _isLoading) return;
+      if (mounted) setState(() => _isLoadingMore = true);
+    } else {
+      if (mounted) {
+        setState(() {
+          _isLoading = true;
+          _currentPage = 1;
+          _hasNextPage = false;
+        });
+      }
+    }
 
     final token = await _authStorage.getAuthToken();
     if (token == null || token.isEmpty) {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _isLoadingMore = false;
+        });
+      }
       return;
     }
+
+    final pageToLoad = loadMore ? _currentPage + 1 : 1;
 
     try {
       final mappedTab = ProductCatalog.apiTabForCategory(widget.category);
@@ -267,7 +322,7 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
                                  (tab?.toLowerCase().contains('essentials') == true) || 
                                  (action?.toLowerCase() == 'kids');
                                  
-      if (!isKidsOrEssentials) {
+      if (!loadMore && !isKidsOrEssentials) {
         if (kDebugMode) {
           debugPrint('SAVED_ADDRESS_DEBUG');
           debugPrint('Comfort Wear screen opened');
@@ -283,21 +338,30 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
         }
       }
 
-      var products = await _productRepository.getProducts(
-        forceRefresh: forceRefresh,
+      final products = await _productRepository.getProducts(
+        forceRefresh: forceRefresh || loadMore,
         useNearbyLocation: isNearby,
         action: action,
         age: age,
         gender: gender,
         tab: tab,
-        page: 1,
-        limit: 12,
+        page: pageToLoad,
+        limit: _pageSize,
       );
-      _applyListing(products);
+      _applyListing(
+        products,
+        append: loadMore,
+        apiCount: products.length,
+        page: pageToLoad,
+      );
+      _currentPage = pageToLoad;
+      _hasNextPage = _productRepository.lastHasNextPage;
       _loadFailed = false;
     } on ApiException catch (e) {
-      _apiItems = [];
-      _loadFailed = true;
+      if (!loadMore) {
+        _apiItems = [];
+        _loadFailed = true;
+      }
       if (e.message.contains('Location is missing') && mounted) {
         final mappedTab = ProductCatalog.apiTabForCategory(widget.category);
         final tab = (mappedTab != null && mappedTab.isNotEmpty)
@@ -357,11 +421,28 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
         }
       }
     } catch (_) {
-      _apiItems = [];
-      _loadFailed = true;
+      if (!loadMore) {
+        _apiItems = [];
+        _loadFailed = true;
+      }
     }
 
-    if (mounted) setState(() => _isLoading = false);
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+        _isLoadingMore = false;
+      });
+    }
+  }
+
+  Future<void> _loadMoreProducts() async {
+    await _loadProducts(
+      forceRefresh: true,
+      loadMore: true,
+      action: _isKidsCategory ? 'kids' : null,
+      age: _filterSize,
+      gender: _filterGender,
+    );
   }
 
   /// Kids listing API: always hits network with `action=kids` (+ age/gender).
@@ -377,12 +458,17 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
     );
   }
 
-  void _applyListing(List<Product> products) {
+  void _applyListing(
+    List<Product> products, {
+    required bool append,
+    required int apiCount,
+    required int page,
+  }) {
     final listing = ProductCatalog.wardrobeListingItems(
       products,
       widget.category,
     );
-    _apiItems = listing
+    final mapped = listing
         .map(
           (product) => ProductMapper.toWardrobeItem(
             product,
@@ -390,6 +476,46 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
           ),
         )
         .toList(growable: false);
+
+    if (!append) {
+      _apiItems = mapped;
+    } else {
+      final seen = <String>{
+        for (final item in _apiItems)
+          if (item.productId != null && item.productId!.isNotEmpty)
+            item.productId!,
+      };
+      final merged = List<WardrobeItem>.from(_apiItems);
+      for (final item in mapped) {
+        final id = item.productId?.trim() ?? '';
+        if (id.isEmpty) {
+          merged.add(item);
+          continue;
+        }
+        if (seen.add(id)) {
+          merged.add(item);
+        } else if (kDebugMode) {
+          debugPrint(
+            '[PRODUCT_LIST_FILTER] category=${widget.category} '
+            'productId=$id productName=${item.title} reason=duplicate_page_item',
+          );
+        }
+      }
+      _apiItems = merged;
+    }
+
+    if (kDebugMode) {
+      debugPrint('[PRODUCT_LIST_COUNTS]');
+      debugPrint('Category: ${widget.category}');
+      debugPrint('API product count: $apiCount');
+      debugPrint('Parsed product count: $apiCount');
+      debugPrint('Filtered product count: ${listing.length}');
+      debugPrint('Displayed product count: ${_apiItems.length}');
+      debugPrint('Current page: $page');
+      debugPrint('Has next page: ${_productRepository.lastHasNextPage}');
+      debugPrint('totalItems=${_productRepository.lastTotalItems}');
+      debugPrint('totalPages=${_productRepository.lastTotalPages}');
+    }
   }
 
   bool get _isKidsCategory {
@@ -430,9 +556,9 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
 
   bool _isVariantAvailableForListing(WardrobeItem item, ProductVariant? variant) {
     if (item.variants.isNotEmpty) {
-      final availableVariants = item.variants.where(
-        (v) => !_isOutOfStockStatus(v.stockStatus) && v.stockOnHand > 0,
-      ).length;
+      // Show product when ANY variant is sellable. Do not require stockOnHand>0
+      // when backend marks the variant IN_STOCK.
+      final availableVariants = item.variants.where(_isVariantSellable).length;
       final hasAvailableVariant = availableVariants > 0;
       final isProductOutOfStock = !hasAvailableVariant;
       
@@ -451,6 +577,11 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
       return false;
     }
     return true;
+  }
+
+  bool _isVariantSellable(ProductVariant variant) {
+    if (!_isOutOfStockStatus(variant.stockStatus)) return true;
+    return variant.stockOnHand > 0;
   }
 
 
@@ -534,6 +665,8 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
 
   @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
     _searchController.dispose();
     super.dispose();
   }
@@ -621,6 +754,7 @@ class _WardrobeScreenState extends State<WardrobeScreen> {
                             ],
                           )
                         : GridView.builder(
+                            controller: _scrollController,
                             physics: const AlwaysScrollableScrollPhysics(),
                       padding: EdgeInsets.fromLTRB(16.w, 4.h, 16.w, 24.h),
                       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
